@@ -1,7 +1,7 @@
 services:
   bot:
     build: .
-    container_name: lol-todo-bot
+    container_name: chetam-bot
     restart: unless-stopped
     env_file:
       - .env

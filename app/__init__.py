@@ -1,1 +1,1 @@
-"""lol-todo Telegram bot application package."""
+"""CheTam («Чё там на завтра?») Telegram bot application package."""

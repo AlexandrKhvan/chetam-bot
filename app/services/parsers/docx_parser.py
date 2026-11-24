@@ -56,6 +56,10 @@ MONTH_MAP: dict[str, int] = {
     "дек": 12,
 }
 
+DATE_RANGE_RE = re.compile(
+    r"(?:с|from)?\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})\s*(?:по|[-–—]|to)\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})",
+    re.IGNORECASE,
+)
 DATE_NUMERIC_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b")
 DATE_TEXT_RU_RE = re.compile(
     r"\b(\d{1,2})\s+(январ[яь]|феврал[яь]|март[а]?|апрел[яь]|ма[яй]|июн[яь]|июл[яь]|август[а]?|сентябр[яь]|октябр[яь]|ноябр[яь]|декабр[яь])\b",
@@ -69,6 +73,19 @@ ROOM_RE = re.compile(
     r"\b(?:ауд\.?|каб\.?|к\.|room|аудитория)\s*[:.]?\s*([A-Za-zА-Яа-я0-9\-/]*\d[A-Za-zА-Яа-я0-9\-/]*)",
     re.IGNORECASE,
 )
+LEADING_ROOM_RE = re.compile(r"^(\d{3}[А-Яа-яA-Za-z]?)\s+(.*)$")
+ZOOM_RE = re.compile(r"\bzoom\b", re.IGNORECASE)
+GROUP_TAG_RE = re.compile(r"(?:^|[\s.,;(])([А-ЯЁA-Z]{2,5}-\d{2,3}[А-Яа-я]?)\b")
+ROMAN_PAIR_RE = re.compile(r"^[IVX]{1,4}$")
+MODE_CELL_RE = re.compile(r"^(?:ОО|ДОО|ДО)(?:[\s/\n]+(?:ОО|ДОО|ДО))*$", re.IGNORECASE)
+TEACHER_SPLIT_RE = re.compile(
+    r"\s+(?=(?:ст\.?\s*преп\.?|преп\.?|доцент|профессор|проф\.?|асс\.?|КФ\s+МГУ|МГУ)\b)",
+    re.IGNORECASE,
+)
+CLASS_TYPE_RE = re.compile(
+    r"\b(Лекци[яи]|Семинар[ы]?|Сем\.?|Практик[аи]|Лаб\.?\s*раб\.?|Спец\.?\s*группа)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -76,10 +93,37 @@ def _normalize_whitespace(text: str) -> str:
 
 
 def _resolve_week_monday(reference_date: date) -> date:
-    # If uploaded on Sunday, assume user is uploading next week's schedule
     if reference_date.weekday() == 6:
         return reference_date + timedelta(days=1)
     return reference_date - timedelta(days=reference_date.weekday())
+
+
+def detect_date_range_in_doc(doc: Document) -> tuple[date, date] | None:
+    """Finds an explicit date range like 'с 23.11.2026 по 28.11.2026' in paragraphs or tables."""
+    texts: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables[:2]:
+        for row in table.rows[:10]:
+            for cell in _dedupe_row_cells(row):
+                if cell:
+                    texts.append(cell)
+
+    for text in texts:
+        m = DATE_RANGE_RE.search(text)
+        if not m:
+            continue
+        d1, mo1, y1, d2, mo2, y2 = map(int, m.groups())
+        if y1 < 100:
+            y1 += 2000
+        if y2 < 100:
+            y2 += 2000
+        try:
+            start = date(y1, mo1, d1)
+            end = date(y2, mo2, d2)
+            if 0 <= (end - start).days <= 14:
+                return start, end
+        except ValueError:
+            continue
+    return None
 
 
 def detect_date_in_text(text: str, reference_date: date) -> date | None:
@@ -98,7 +142,6 @@ def detect_date_in_text(text: str, reference_date: date) -> date | None:
                 year_val += 2000
         else:
             year_val = reference_date.year
-            # Handle Dec -> Jan year rollover
             if reference_date.month == 12 and month_val == 1:
                 year_val += 1
             elif reference_date.month == 1 and month_val == 12:
@@ -174,8 +217,92 @@ def _dedupe_row_cells(row) -> list[str]:
     return texts
 
 
+def _split_multi_entry_cell(raw_cell: str) -> list[str]:
+    """Splits a cell that may hold entries for multiple groups (e.g. ВМ-21 and ВМ-22),
+    while re-joining wrapped continuation lines like teacher names."""
+    raw_lines = [_normalize_whitespace(line) for line in raw_cell.splitlines()]
+    lines = [line for line in raw_lines if line]
+    if len(lines) <= 1:
+        return lines
+
+    entries: list[str] = []
+    for line in lines:
+        starts_new = bool(
+            LEADING_ROOM_RE.match(line)
+            or line.lower().startswith("физическая культура")
+            or (entries and GROUP_TAG_RE.search(entries[-1]))
+        )
+        if not entries or starts_new:
+            entries.append(line)
+        else:
+            entries[-1] = f"{entries[-1]} {line}".strip()
+    return entries
+
+
+def _parse_university_entry(entry_text: str) -> tuple[str, str, str, str]:
+    """Parses a university class string like:
+    '614 Zoom Дифференциальные уравнения Лекции доцент МГУ Разборов А.Г. ВМ-21'
+    into (title, location, notes, group_tag)."""
+    text = _normalize_whitespace(entry_text)
+    group_tag = ""
+    m_group = GROUP_TAG_RE.search(text)
+    if m_group:
+        group_tag = m_group.group(1).upper()
+        text = (text[: m_group.start(1)] + text[m_group.end(1) :]).strip(" .,;-")
+
+    location_parts: list[str] = []
+    m_lead = LEADING_ROOM_RE.match(text)
+    if m_lead:
+        location_parts.append(f"ауд. {m_lead.group(1)}")
+        text = m_lead.group(2).strip()
+    else:
+        m_room = ROOM_RE.search(text)
+        if m_room:
+            location_parts.append(f"ауд. {m_room.group(1)}")
+
+    if ZOOM_RE.search(text):
+        location_parts.append("Zoom")
+        text = ZOOM_RE.sub("", text).strip(" .,;-")
+
+    location = " · ".join(location_parts)
+
+    notes = ""
+    parts = TEACHER_SPLIT_RE.split(text, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip():
+        subject_part = parts[0].strip(" .,;-")
+        notes = parts[1].strip(" .,;-")
+    else:
+        subject_part = text.strip(" .,;-")
+
+    m_type = CLASS_TYPE_RE.search(subject_part)
+    if m_type:
+        raw_type = m_type.group(1).lower()
+        if raw_type.startswith("лекц"):
+            pretty_type = "Лекция"
+        elif raw_type.startswith("сем"):
+            pretty_type = "Семинар"
+        elif raw_type.startswith("практ"):
+            pretty_type = "Практика"
+        elif raw_type.startswith("лаб"):
+            pretty_type = "Лаб."
+        elif raw_type.startswith("спец"):
+            pretty_type = "Спец.группа"
+        else:
+            pretty_type = m_type.group(1)
+        clean_subj = _normalize_whitespace(
+            subject_part[: m_type.start()] + " " + subject_part[m_type.end() :]
+        ).strip(" .,;-")
+        if clean_subj:
+            title = f"{clean_subj} ({pretty_type})"
+        else:
+            title = subject_part
+    else:
+        title = subject_part
+
+    return _normalize_whitespace(title), location, _normalize_whitespace(notes), group_tag
+
+
 def _parse_matrix_table(table, reference_date: date) -> list[ParsedScheduleItem]:
-    """Matrix grid: header row has weekdays/dates in columns, first col has time slots."""
     if len(table.rows) < 2:
         return []
     header_cells = [c.text.strip() for c in table.rows[0].cells]
@@ -226,7 +353,6 @@ def _parse_matrix_table(table, reference_date: date) -> list[ParsedScheduleItem]
 
 
 def _parse_row_table(table, reference_date: date) -> list[ParsedScheduleItem]:
-    """Row-oriented table: Day | Time | Subject | Room (or Day header rows)."""
     items: list[ParsedScheduleItem] = []
     current_date: date | None = None
 
@@ -236,14 +362,17 @@ def _parse_row_table(table, reference_date: date) -> list[ParsedScheduleItem]:
         if not non_empty:
             continue
 
-        # Check if entire row is a day header (1 unique non-empty cell with a date/weekday)
         if len(non_empty) == 1:
+            if DATE_RANGE_RE.search(non_empty[0]):
+                continue
             maybe_date = detect_date_in_text(non_empty[0], reference_date)
             if maybe_date and not extract_time_range(non_empty[0]):
                 current_date = maybe_date
                 continue
 
-        # Check first cell for date/weekday
+        if cells and DATE_RANGE_RE.search(cells[0]):
+            continue
+
         row_date = detect_date_in_text(cells[0], reference_date) if cells else None
         remaining_cells = list(cells)
         if row_date is not None and not extract_time_range(cells[0]):
@@ -255,7 +384,6 @@ def _parse_row_table(table, reference_date: date) -> list[ParsedScheduleItem]:
         if current_date is None:
             continue
 
-        # Find time cell among remaining cells
         time_idx: int | None = None
         time_info: tuple[str, str] | None = None
         for idx, cell_text in enumerate(remaining_cells):
@@ -269,14 +397,16 @@ def _parse_row_table(table, reference_date: date) -> list[ParsedScheduleItem]:
             continue
 
         start_t, end_t = time_info
-        # Collect title & optional room from cells other than the time cell
         other_cells = [
             c.strip()
             for idx, c in enumerate(remaining_cells)
-            if idx != time_idx and c.strip() and c.strip() not in {"-", "—", "–"}
+            if idx != time_idx
+            and c.strip()
+            and c.strip() not in {"-", "—", "–"}
+            and not ROMAN_PAIR_RE.match(c.strip())
+            and not MODE_CELL_RE.match(c.strip())
         ]
         if not other_cells:
-            # Maybe title is inside the same cell after the time range
             stripped = TIME_RANGE_RE.sub("", remaining_cells[time_idx])
             stripped = SINGLE_TIME_RE.sub("", stripped).strip(" -–—:\n\t")
             if stripped:
@@ -308,6 +438,71 @@ def _parse_row_table(table, reference_date: date) -> list[ParsedScheduleItem]:
                     notes=notes,
                 )
             )
+    return items
+
+
+def _parse_sequential_day_blocks(
+    doc: Document, start_date: date
+) -> list[ParsedScheduleItem]:
+    """Parses university schedules split into repeating daily time-slot blocks across
+    one or more tables (where column 0 has no text / vertical shapes and each new day
+    resets start_time back to the first slot like 09:00)."""
+    items: list[ParsedScheduleItem] = []
+    day_index = -1
+    prev_start_minutes: int | None = None
+
+    for table in doc.tables:
+        for row in table.rows:
+            cells = _dedupe_row_cells(row)
+            time_idx: int | None = None
+            time_info: tuple[str, str] | None = None
+            for idx, cell_text in enumerate(cells):
+                t = extract_time_range(cell_text)
+                if t:
+                    time_idx = idx
+                    time_info = t
+                    break
+
+            if time_info is None or time_idx is None:
+                continue
+
+            start_t, end_t = time_info
+            h, m = map(int, start_t.split(":"))
+            start_minutes = h * 60 + m
+
+            if prev_start_minutes is None or start_minutes <= prev_start_minutes:
+                day_index += 1
+            prev_start_minutes = start_minutes
+
+            event_day = start_date + timedelta(days=day_index)
+
+            content_cells = [
+                c.strip()
+                for idx, c in enumerate(cells)
+                if idx != time_idx
+                and c.strip()
+                and c.strip() not in {"-", "—", "–"}
+                and not ROMAN_PAIR_RE.match(c.strip())
+                and not MODE_CELL_RE.match(c.strip())
+            ]
+            if not content_cells:
+                continue
+
+            raw_content = "\n".join(content_cells)
+            for entry_line in _split_multi_entry_cell(raw_content):
+                title, location, notes, group_tag = _parse_university_entry(entry_line)
+                if title:
+                    items.append(
+                        ParsedScheduleItem(
+                            event_date=event_day.isoformat(),
+                            start_time=start_t,
+                            end_time=end_t,
+                            title=title,
+                            location=location,
+                            notes=notes,
+                            group_tag=group_tag,
+                        )
+                    )
     return items
 
 
@@ -349,8 +544,20 @@ def _parse_paragraphs(doc: Document, reference_date: date) -> list[ParsedSchedul
     return items
 
 
+def extract_detected_groups(items: list[ParsedScheduleItem]) -> list[str]:
+    return sorted({i.group_tag for i in items if i.group_tag})
+
+
+def filter_items_by_group(
+    items: list[ParsedScheduleItem], group: str | None
+) -> list[ParsedScheduleItem]:
+    if not group:
+        return list(items)
+    target = group.strip().upper()
+    return [i for i in items if not i.group_tag or i.group_tag.upper() == target]
+
+
 def extract_docx_text(source: bytes | str | Path) -> str:
-    """Extracts a clean plain-text summary of paragraphs and tables for LLM fallback."""
     doc = Document(io.BytesIO(source)) if isinstance(source, bytes) else Document(str(source))
     lines: list[str] = []
     for p in doc.paragraphs:
@@ -374,25 +581,31 @@ def parse_docx_schedule(
     ref = reference_date or date.today()
     doc = Document(io.BytesIO(source)) if isinstance(source, bytes) else Document(str(source))
 
+    date_range = detect_date_range_in_doc(doc)
+    effective_ref = date_range[0] if date_range else ref
+
     items: list[ParsedScheduleItem] = []
     for table in doc.tables:
-        matrix_items = _parse_matrix_table(table, ref)
+        matrix_items = _parse_matrix_table(table, effective_ref)
         if matrix_items:
             items.extend(matrix_items)
         else:
-            items.extend(_parse_row_table(table, ref))
+            items.extend(_parse_row_table(table, effective_ref))
+
+    if not items and doc.tables:
+        anchor_monday = date_range[0] if date_range else _resolve_week_monday(ref)
+        items.extend(_parse_sequential_day_blocks(doc, anchor_monday))
 
     if not items:
-        items.extend(_parse_paragraphs(doc, ref))
+        items.extend(_parse_paragraphs(doc, effective_ref))
 
-    # Deduplicate and sort chronologically
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     unique: list[ParsedScheduleItem] = []
     for item in items:
-        key = (item.event_date, item.start_time, item.title.lower())
+        key = (item.event_date, item.start_time, item.title.lower(), item.group_tag)
         if key not in seen:
             seen.add(key)
             unique.append(item)
 
-    unique.sort(key=lambda x: (x.event_date, x.start_time, x.title))
+    unique.sort(key=lambda x: (x.event_date, x.start_time, x.group_tag, x.title))
     return unique

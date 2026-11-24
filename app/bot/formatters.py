@@ -184,13 +184,16 @@ def render_week_schedule(
     return "\n".join(lines).rstrip()
 
 
-def render_parsed_preview(items: list[ParsedScheduleItem], source_label: str) -> str:
+def render_parsed_preview(
+    items: list[ParsedScheduleItem], source_label: str, selected_group: str = ""
+) -> str:
     by_day: dict[str, list[ParsedScheduleItem]] = defaultdict(list)
     for item in items:
         by_day[item.event_date].append(item)
 
+    grp_info = f" · группа <b>{escape(selected_group)}</b>" if selected_group else ""
     lines = [
-        f"🔍 <b>Распознано занятий: {len(items)}</b> ({escape(source_label)})",
+        f"🔍 <b>Распознано занятий: {len(items)}</b> ({escape(source_label)}{grp_info})",
         "Проверь предпросмотр перед сохранением:",
         "",
     ]
@@ -280,11 +283,13 @@ def render_settings(user: UserProfile, vision_enabled: bool) -> str:
     ev_state = "вкл ✅" if user.evening_reminder_enabled else "выкл 🔕"
     mo_state = "вкл ✅" if user.morning_digest_enabled else "выкл 🔕"
     vision_state = "подключён ✅" if vision_enabled else "не настроен (только .docx и ручной ввод)"
+    grp_label = escape(user.study_group) if user.study_group else "не выбрана (все)"
     return "\n".join(
         [
             "⚙️ <b>Настройки</b>",
             "",
             f"🌍 Часовой пояс: <code>{escape(user.timezone)}</code>",
+            f"🎓 Учебная группа: <b>{grp_label}</b>",
             f"🌙 Вечернее планирование: <b>{escape(user.evening_plan_time)}</b> ({ev_state})",
             f"☀️ Утренняя сводка: <b>{escape(user.morning_digest_time)}</b> ({mo_state})",
             f"📷 Распознавание фото (AI): {vision_state}",

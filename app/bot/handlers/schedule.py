@@ -14,11 +14,14 @@ from app.bot.formatters import render_parsed_preview, render_week_schedule
 from app.bot.handlers.common import safe_edit
 from app.bot.keyboards import BTN_SCHEDULE, schedule_import_confirm_kb, schedule_week_kb
 from app.bot.states import AddScheduleEventStates, ScheduleImportStates
+from app.db.database import Database
 from app.db.models import ParsedScheduleItem, UserProfile
 from app.services.parsers.docx_parser import (
     detect_date_in_text,
+    extract_detected_groups,
     extract_docx_text,
     extract_time_range,
+    filter_items_by_group,
     parse_docx_schedule,
 )
 from app.services.parsers.vision_parser import VisionScheduleParser
@@ -227,15 +230,26 @@ async def handle_document_upload(
         )
         return
 
+    groups = extract_detected_groups(items)
+    selected_group = (
+        user_profile.study_group
+        if user_profile.study_group and user_profile.study_group.upper() in {g.upper() for g in groups}
+        else ""
+    )
+    visible_items = filter_items_by_group(items, selected_group)
+
     await state.set_state(ScheduleImportStates.confirming)
     await state.update_data(
         parsed_items=[asdict(i) for i in items],
         import_source="docx",
+        source_label=source_label,
+        detected_groups=groups,
+        selected_group=selected_group,
     )
     await safe_edit(
         status_msg,
-        render_parsed_preview(items, source_label),
-        schedule_import_confirm_kb(),
+        render_parsed_preview(visible_items, source_label, selected_group),
+        schedule_import_confirm_kb(groups, selected_group),
     )
 
 
@@ -317,10 +331,34 @@ async def _process_image_file(
     )
 
 
+@router.callback_query(ScheduleImportStates.confirming, F.data.startswith("sch:grp:"))
+async def cb_schedule_import_group(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    chosen = callback.data.split(":")[2]
+    selected_group = "" if chosen == "ALL" else chosen
+    data = await state.get_data()
+    all_items = [ParsedScheduleItem(**entry) for entry in data.get("parsed_items", [])]
+    groups = data.get("detected_groups", [])
+    source_label = data.get("source_label", "файл")
+
+    await state.update_data(selected_group=selected_group)
+    visible_items = filter_items_by_group(all_items, selected_group)
+    if callback.message:
+        await safe_edit(
+            callback.message,
+            render_parsed_preview(visible_items, source_label, selected_group),
+            schedule_import_confirm_kb(groups, selected_group),
+        )
+    await callback.answer(f"Фильтр: {selected_group or 'все группы'}")
+
+
 @router.callback_query(ScheduleImportStates.confirming, F.data.startswith("sch:imp:"))
 async def cb_schedule_import_confirm(
     callback: CallbackQuery,
     state: FSMContext,
+    db: Database,
     schedule_service: ScheduleService,
     user_profile: UserProfile,
 ) -> None:
@@ -336,8 +374,13 @@ async def cb_schedule_import_confirm(
 
     raw_items = data.get("parsed_items", [])
     source = data.get("import_source", "docx")
-    items = [ParsedScheduleItem(**entry) for entry in raw_items]
+    selected_group = data.get("selected_group", "")
+    all_items = [ParsedScheduleItem(**entry) for entry in raw_items]
+    items = filter_items_by_group(all_items, selected_group)
     replace_dates = action == "replace"
+
+    if selected_group:
+        await db.update_user_settings(user_profile.user_id, study_group=selected_group)
 
     saved = await schedule_service.import_parsed_events(
         user_profile.user_id,

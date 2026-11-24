@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     morning_digest_time TEXT NOT NULL DEFAULT '08:00',
     evening_reminder_enabled INTEGER NOT NULL DEFAULT 1,
     morning_digest_enabled INTEGER NOT NULL DEFAULT 1,
+    study_group TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -91,6 +92,13 @@ class Database:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self.connect() as conn:
             await conn.executescript(SCHEMA_SQL)
+            # Safe additive migration for existing DBs
+            cur = await conn.execute("PRAGMA table_info(users)")
+            cols = {row["name"] for row in await cur.fetchall()}
+            if "study_group" not in cols:
+                await conn.execute(
+                    "ALTER TABLE users ADD COLUMN study_group TEXT NOT NULL DEFAULT ''"
+                )
             await conn.commit()
 
     @asynccontextmanager
@@ -162,6 +170,7 @@ class Database:
         morning_digest_time: str | None = None,
         evening_reminder_enabled: bool | None = None,
         morning_digest_enabled: bool | None = None,
+        study_group: str | None = None,
     ) -> UserProfile | None:
         updates: list[str] = []
         params: list[object] = []
@@ -180,6 +189,9 @@ class Database:
         if morning_digest_enabled is not None:
             updates.append("morning_digest_enabled = ?")
             params.append(int(morning_digest_enabled))
+        if study_group is not None:
+            updates.append("study_group = ?")
+            params.append(study_group.strip())
 
         if not updates:
             return await self.get_user(user_id)
@@ -206,5 +218,6 @@ class Database:
             morning_digest_time=row["morning_digest_time"],
             evening_reminder_enabled=bool(row["evening_reminder_enabled"]),
             morning_digest_enabled=bool(row["morning_digest_enabled"]),
+            study_group=row["study_group"] if "study_group" in row.keys() else "",
             created_at=row["created_at"],
         )

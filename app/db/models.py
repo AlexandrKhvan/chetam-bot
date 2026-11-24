@@ -13,6 +13,7 @@ class UserProfile:
     morning_digest_time: str = "08:00"
     evening_reminder_enabled: bool = True
     morning_digest_enabled: bool = True
+    study_group: str = ""
     created_at: str = ""
 
 
@@ -66,6 +67,7 @@ class ParsedScheduleItem:
     title: str = ""
     location: str = ""
     notes: str = ""
+    group_tag: str = ""
 
 
 @dataclass(slots=True)

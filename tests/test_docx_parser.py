@@ -5,7 +5,11 @@ from datetime import date
 
 from docx import Document
 
-from app.services.parsers.docx_parser import parse_docx_schedule
+from app.services.parsers.docx_parser import (
+    extract_detected_groups,
+    filter_items_by_group,
+    parse_docx_schedule,
+)
 
 
 def _doc_to_bytes(doc: Document) -> bytes:
@@ -81,3 +85,65 @@ def test_parse_paragraph_schedule():
     assert items[0].start_time == "08:30"
     assert items[0].end_time == "10:00"
     assert items[0].location == "ауд. 210"
+
+
+def test_parse_university_sequential_day_blocks_with_groups():
+    doc = Document()
+    t1 = doc.add_table(rows=6, cols=5)
+    t1_rows = [
+        ("", "", "РАСПИСАНИЕ ЗАНЯТИЙ с 23.11.2026 по 28.11.2026", "", ""),
+        ("", "", "09:00 - 10:30", "I", ""),
+        (
+            "",
+            "ОО",
+            "12:30 - 14:00",
+            "III",
+            "501 Математический анализ III Семинары доцент Муканов А.Б. ВМ-21\n"
+            "614 Математический анализ III Семинары доцент Бекмаганбетов К.А. ВМ-22",
+        ),
+        (
+            "",
+            "ДОО",
+            "09:00 - 10:30",
+            "I",
+            "614 Zoom Дифференциальные уравнения Лекции доцент Разборов А.Г.",
+        ),
+        (
+            "",
+            "ОО",
+            "10:40 - 12:10",
+            "II",
+            "501 Дифференциальные уравнения Семинары преп. Юрмальник Р.Ю. ВМ-22\n"
+            "614 Теория вероятностей Семинары доцент\nГалиева Н.К. ВМ-21",
+        ),
+        ("", "", "14:10 - 15:40", "IV", ""),
+    ]
+    for r_idx, vals in enumerate(t1_rows):
+        for c_idx, val in enumerate(vals):
+            t1.rows[r_idx].cells[c_idx].text = val
+
+    t2 = doc.add_table(rows=2, cols=5)
+    t2_rows = [
+        ("", "ОО", "09:00 - 10:30", "I", "702 Практикум на ЭВМ Сем. преп. Назымбеков С.Р. ВМ-21"),
+        ("", "", "10:40 - 12:10", "II", ""),
+    ]
+    for r_idx, vals in enumerate(t2_rows):
+        for c_idx, val in enumerate(vals):
+            t2.rows[r_idx].cells[c_idx].text = val
+
+    items = parse_docx_schedule(_doc_to_bytes(doc), reference_date=date(2026, 11, 25))
+    groups = extract_detected_groups(items)
+    assert groups == ["ВМ-21", "ВМ-22"]
+
+    vm21 = filter_items_by_group(items, "ВМ-21")
+    assert len(vm21) == 4
+    assert vm21[0].event_date == "2026-11-23"
+    assert vm21[0].title == "Математический анализ III (Семинар)"
+    assert vm21[0].location == "ауд. 501"
+    assert vm21[1].event_date == "2026-11-24"
+    assert vm21[1].location == "ауд. 614 · Zoom"
+    assert vm21[2].event_date == "2026-11-24"
+    assert vm21[2].title == "Теория вероятностей (Семинар)"
+    assert vm21[3].event_date == "2026-11-25"
+    assert vm21[3].title == "Практикум на ЭВМ (Семинар)"
+

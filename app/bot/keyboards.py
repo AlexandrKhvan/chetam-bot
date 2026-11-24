@@ -263,24 +263,39 @@ def schedule_week_kb(anchor_iso: str, start_iso: str, end_iso: str, today_iso: s
     )
 
 
-def schedule_import_confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Сохранить (заменить эти дни)",
-                    callback_data="sch:imp:replace",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="➕ Добавить к текущему",
-                    callback_data="sch:imp:append",
-                ),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="sch:imp:cancel"),
-            ],
+def schedule_import_confirm_kb(
+    groups: list[str] | None = None, selected_group: str = ""
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if groups and len(groups) > 1:
+        group_row: list[InlineKeyboardButton] = []
+        for g in groups[:4]:
+            mark = "🎯 " if g.upper() == selected_group.upper() else ""
+            group_row.append(
+                InlineKeyboardButton(text=f"{mark}{g}", callback_data=f"sch:grp:{g}")
+            )
+        all_mark = "🎯 " if not selected_group else ""
+        group_row.append(InlineKeyboardButton(text=f"{all_mark}Все", callback_data="sch:grp:ALL"))
+        rows.append(group_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Сохранить (заменить эти дни)",
+                callback_data="sch:imp:replace",
+            )
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Добавить к текущему",
+                callback_data="sch:imp:append",
+            ),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="sch:imp:cancel"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def history_day_kb(day_iso: str, today_iso: str) -> InlineKeyboardMarkup:

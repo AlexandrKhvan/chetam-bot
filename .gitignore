@@ -18,8 +18,9 @@ env/
 *.pem
 *.key
 
-# Local data & SQLite databases
+# Local data, personal schedules & SQLite databases
 data/
+*.docx
 *.db
 *.sqlite
 *.sqlite3

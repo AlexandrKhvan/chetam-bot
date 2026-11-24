@@ -41,7 +41,7 @@ async def run_bot() -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-    logger = logging.getLogger("lol-todo")
+    logger = logging.getLogger("chetam-bot")
 
     if not settings.bot_token or settings.bot_token == "your_telegram_bot_token_here":
         logger.error("BOT_TOKEN is not configured. Copy .env.example to .env and set BOT_TOKEN.")
@@ -79,7 +79,7 @@ async def run_bot() -> None:
 
     await _set_bot_commands(bot)
     scheduler.start()
-    logger.info("lol-todo bot started. Database: %s", settings.database_path)
+    logger.info("CheTam bot started. Database: %s", settings.database_path)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
