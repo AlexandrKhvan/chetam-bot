@@ -7,3 +7,33 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+
+  webapp:
+    build: .
+    container_name: chetam-webapp
+    restart: unless-stopped
+    command: ["uvicorn", "app.web.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: chetam-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - WEBAPP_DOMAIN=${WEBAPP_DOMAIN:-3-106-193-6.sslip.io}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - webapp
+
+volumes:
+  caddy_data:
+  caddy_config:

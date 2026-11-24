@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(default="", alias="BOT_TOKEN")
     allowed_user_ids_raw: str = Field(default="", alias="ALLOWED_USER_IDS")
     database_path: Path = Field(default=Path("data/chetam.db"), alias="DATABASE_PATH")
+    webapp_url: str = Field(default="", alias="WEBAPP_URL")
 
     default_timezone: str = Field(default="Asia/Yekaterinburg", alias="DEFAULT_TIMEZONE")
     default_evening_plan_time: str = Field(default="21:00", alias="DEFAULT_EVENING_PLAN_TIME")

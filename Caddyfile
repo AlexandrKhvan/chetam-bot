@@ -1,0 +1,4 @@
+{$WEBAPP_DOMAIN:3-106-193-6.sslip.io} {
+    encode gzip
+    reverse_proxy webapp:8000
+}

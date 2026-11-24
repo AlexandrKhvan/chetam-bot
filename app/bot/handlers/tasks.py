@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from html import escape
 
 from aiogram import F, Router
@@ -8,11 +9,12 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.formatters import render_day_plan
+from app.bot.formatters import PRIORITY_ICON, render_day_plan
 from app.bot.handlers.common import safe_edit
 from app.bot.keyboards import (
     BTN_TODAY,
     BTN_TOMORROW,
+    brain_dump_batch_kb,
     day_manage_kb,
     day_plan_kb,
     pick_from_inbox_kb,
@@ -20,12 +22,16 @@ from app.bot.keyboards import (
 )
 from app.bot.states import AddTaskStates
 from app.db.models import UserProfile
+from app.services.brain_dump import split_brain_dump
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
-from app.services.time_utils import format_date_ru, user_today_iso, user_tomorrow_iso
+from app.services.time_utils import format_date_ru, user_today, user_today_iso, user_tomorrow_iso
 
 router = Router(name="tasks")
 quick_capture_router = Router(name="quick_capture")
+
+# Bounded in-memory cache of recent brain-dump batches: batch_id -> (user_id, task_ids, original_text)
+_RECENT_BATCHES: dict[str, tuple[int, list[int], str]] = {}
 
 LEADING_TIME_RE = re.compile(r"^(\d{1,2})[:.](\d{2})\s+(.+)$")
 
@@ -352,6 +358,74 @@ async def cb_quick_delete(
     await callback.answer("Удалено")
 
 
+@router.callback_query(F.data.startswith("bd:plan:"))
+async def cb_brain_dump_plan_all(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    _, _, batch_id, target_day = callback.data.split(":")
+    entry = _RECENT_BATCHES.get(batch_id)
+    if not entry or entry[0] != user_profile.user_id:
+        await callback.answer("Пакет устарел, открой Инбокс.", show_alert=True)
+        return
+    _, task_ids, _ = entry
+    for tid in task_ids:
+        await task_service.plan_task_for_date(user_profile.user_id, tid, target_day)
+    today_iso = user_today_iso(user_profile.timezone)
+    if callback.message:
+        await safe_edit(
+            callback.message,
+            f"📅 Все задачи (<b>{len(task_ids)}</b>) перенесены на <b>{escape(format_date_ru(target_day, today_iso))}</b>!",
+        )
+    await callback.answer("Запланировано ✅")
+
+
+@router.callback_query(F.data.startswith("bd:merge:"))
+async def cb_brain_dump_merge(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    batch_id = callback.data.split(":")[2]
+    entry = _RECENT_BATCHES.pop(batch_id, None)
+    if not entry or entry[0] != user_profile.user_id:
+        await callback.answer("Пакет устарел.", show_alert=True)
+        return
+    _, task_ids, original_text = entry
+    for tid in task_ids:
+        await task_service.delete_task(user_profile.user_id, tid)
+    single = await task_service.create_task(user_profile.user_id, original_text)
+    today_iso = user_today_iso(user_profile.timezone)
+    tomorrow_iso = user_tomorrow_iso(user_profile.timezone)
+    if callback.message:
+        await safe_edit(
+            callback.message,
+            f"📥 Объединил обратно в одну задачу:\n• <b>{escape(single.title)}</b>",
+            quick_capture_kb(single.id, today_iso, tomorrow_iso),
+        )
+    await callback.answer("Объединено в 1 задачу 🔗")
+
+
+@router.callback_query(F.data.startswith("bd:del:"))
+async def cb_brain_dump_delete(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    batch_id = callback.data.split(":")[2]
+    entry = _RECENT_BATCHES.pop(batch_id, None)
+    if not entry or entry[0] != user_profile.user_id:
+        await callback.answer("Пакет устарел.", show_alert=True)
+        return
+    _, task_ids, _ = entry
+    for tid in task_ids:
+        await task_service.delete_task(user_profile.user_id, tid)
+    if callback.message:
+        await safe_edit(callback.message, f"🗑 Удалено задач: <b>{len(task_ids)}</b>.")
+    await callback.answer("Удалено")
+
+
 # --- Catch-all Quick Capture (registered LAST in dispatcher) ---
 
 
@@ -365,24 +439,70 @@ async def handle_quick_capture(
     if not raw or raw.startswith("/"):
         return
 
-    lines = [line.strip().lstrip("-•*—– ").strip() for line in raw.splitlines() if line.strip()]
-    if not lines:
-        return
-
-    today_iso = user_today_iso(user_profile.timezone)
+    today = user_today(user_profile.timezone)
+    today_iso = today.isoformat()
     tomorrow_iso = user_tomorrow_iso(user_profile.timezone)
 
-    if len(lines) == 1:
-        task = await task_service.create_task(user_profile.user_id, lines[0])
+    drafts = split_brain_dump(raw, today=today)
+    if not drafts:
+        return
+
+    if len(drafts) == 1:
+        d = drafts[0]
+        task = await task_service.create_task(
+            user_profile.user_id,
+            d.title,
+            planned_date=d.planned_date,
+            planned_time=d.planned_time,
+            priority=d.priority,
+        )
+        prio = PRIORITY_ICON.get(task.priority, "🟡")
+        time_part = f"<code>{escape(task.planned_time)}</code> " if task.planned_time else ""
+        if task.planned_date:
+            where = f"📅 На <b>{escape(format_date_ru(task.planned_date, today_iso))}</b>"
+        else:
+            where = "📥 Сохранил в инбокс"
         await message.answer(
-            f"📥 Сохранил в инбокс:\n• <b>{escape(task.title)}</b>",
+            f"{where}:\n• {prio} {time_part}<b>{escape(task.title)}</b>",
             reply_markup=quick_capture_kb(task.id, today_iso, tomorrow_iso),
         )
-    else:
-        created = await task_service.create_many_inbox(user_profile.user_id, lines)
-        preview = "\n".join(f"• {escape(t.title)}" for t in created[:10])
-        extra = f"\n<i>…и ещё {len(created) - 10}</i>" if len(created) > 10 else ""
-        await message.answer(
-            f"📥 Сохранил в инбокс (<b>{len(created)}</b>):\n{preview}{extra}\n\n"
-            "Разберёшь их в <b>📥 Инбоксе</b> или на <b>🌙 Вечернем плане</b>."
+        return
+
+    created = []
+    for d in drafts:
+        created.append(
+            await task_service.create_task(
+                user_profile.user_id,
+                d.title,
+                planned_date=d.planned_date,
+                planned_time=d.planned_time,
+                priority=d.priority,
+            )
         )
+
+    batch_id = secrets.token_hex(4)
+    _RECENT_BATCHES[batch_id] = (user_profile.user_id, [t.id for t in created], raw)
+    if len(_RECENT_BATCHES) > 300:
+        oldest = next(iter(_RECENT_BATCHES))
+        _RECENT_BATCHES.pop(oldest, None)
+
+    lines = [f"🧠 <b>Разобрал сообщение на {len(created)} задач:</b>", ""]
+    for idx, t in enumerate(created[:12], start=1):
+        prio = PRIORITY_ICON.get(t.priority, "🟡")
+        time_part = f"<code>{escape(t.planned_time)}</code> " if t.planned_time else ""
+        if t.planned_date == today_iso:
+            tag = " <i>(сегодня)</i>"
+        elif t.planned_date == tomorrow_iso:
+            tag = " <i>(завтра)</i>"
+        elif t.planned_date:
+            tag = f" <i>({escape(format_date_ru(t.planned_date, today_iso))})</i>"
+        else:
+            tag = ""
+        lines.append(f"{idx}. {prio} {time_part}{escape(t.title)}{tag}")
+    if len(created) > 12:
+        lines.append(f"<i>…и ещё {len(created) - 12}</i>")
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=brain_dump_batch_kb(batch_id, today_iso, tomorrow_iso),
+    )

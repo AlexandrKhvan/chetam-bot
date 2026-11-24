@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from app.bot.handlers import register_handlers
 from app.bot.middlewares import UserContextMiddleware
@@ -21,7 +21,18 @@ from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 
 
-async def _set_bot_commands(bot: Bot) -> None:
+BOT_DESCRIPTION = (
+    "CheTam («Чё там на завтра?») — твой личный планировщик дня, инбокс и трекер учёбы.\n\n"
+    "• Скидывай мысли прямо в чат (хоть всё в кучу одним сообщением) — бот сам разобьёт их на задачи.\n"
+    "• Загружай .docx или фото расписания на неделю — пары подтянутся автоматически.\n"
+    "• Вечером собирай план на завтра за 1 минуту, днём отмечай галочки и смотри историю и стрик.\n"
+    "• Открывай интерактивный Mini App прямо внутри Telegram."
+)
+
+BOT_SHORT_DESCRIPTION = "Личный планировщик дня, инбокс мыслей, расписание учёбы и вечерний ритуал."
+
+
+async def _configure_bot_profile(bot: Bot, webapp_url: str) -> None:
     commands = [
         BotCommand(command="today", description="📅 План на сегодня"),
         BotCommand(command="tomorrow", description="🌅 План на завтра"),
@@ -33,6 +44,18 @@ async def _set_bot_commands(bot: Bot) -> None:
         BotCommand(command="cancel", description="Отменить текущий ввод"),
     ]
     await bot.set_my_commands(commands)
+    try:
+        await bot.set_my_description(BOT_DESCRIPTION)
+        await bot.set_my_short_description(BOT_SHORT_DESCRIPTION)
+        if webapp_url.strip():
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="CheTam",
+                    web_app=WebAppInfo(url=webapp_url.strip()),
+                )
+            )
+    except Exception:
+        logging.getLogger("chetam-bot").warning("Could not update bot profile metadata", exc_info=True)
 
 
 async def run_bot() -> None:
@@ -77,7 +100,7 @@ async def run_bot() -> None:
 
     scheduler = ReminderScheduler(bot=bot, db=db, task_service=task_service)
 
-    await _set_bot_commands(bot)
+    await _configure_bot_profile(bot, settings.webapp_url)
     scheduler.start()
     logger.info("CheTam bot started. Database: %s", settings.database_path)
     try:

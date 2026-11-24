@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 
 from app.db.models import DayPlan, Task, UserProfile
 from app.services.time_utils import shift_date_iso
@@ -40,6 +46,29 @@ def quick_capture_kb(task_id: int, today_iso: str, tomorrow_iso: str) -> InlineK
                 InlineKeyboardButton(text="🔴 Важно", callback_data=f"qc:prio:{task_id}"),
                 InlineKeyboardButton(text="🗑 Удалить", callback_data=f"qc:del:{task_id}"),
             ],
+        ]
+    )
+
+
+def brain_dump_batch_kb(batch_id: str, today_iso: str, tomorrow_iso: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Все на сегодня", callback_data=f"bd:plan:{batch_id}:{today_iso}"),
+                InlineKeyboardButton(text="🌅 Все на завтра", callback_data=f"bd:plan:{batch_id}:{tomorrow_iso}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔗 Объединить в 1 задачу", callback_data=f"bd:merge:{batch_id}"),
+                InlineKeyboardButton(text="🗑 Удалить всё", callback_data=f"bd:del:{batch_id}"),
+            ],
+        ]
+    )
+
+
+def webapp_launch_kb(webapp_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Открыть CheTam Mini App", web_app=WebAppInfo(url=webapp_url))]
         ]
     )
 

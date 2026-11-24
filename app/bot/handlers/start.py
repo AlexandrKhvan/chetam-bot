@@ -5,7 +5,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from app.bot.keyboards import main_menu_kb
+from app.bot.keyboards import main_menu_kb, webapp_launch_kb
+from app.config import Settings
 from app.db.models import UserProfile
 
 router = Router(name="start")
@@ -30,9 +31,19 @@ WELCOME_TEXT = """👋 <b>Привет! Я CheTam («Чё там на завтр
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, user_profile: UserProfile) -> None:
+async def cmd_start(
+    message: Message,
+    state: FSMContext,
+    user_profile: UserProfile,
+    settings: Settings,
+) -> None:
     await state.clear()
     await message.answer(WELCOME_TEXT, reply_markup=main_menu_kb())
+    if settings.webapp_url:
+        await message.answer(
+            "✨ <b>Доступен CheTam Mini App</b> — интерактивный планировщик, инбокс и статистика прямо внутри Telegram:",
+            reply_markup=webapp_launch_kb(settings.webapp_url),
+        )
 
 
 @router.message(Command("help"))

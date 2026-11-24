@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="color-scheme" content="dark light" />
+  <title>CheTam — Чё там на завтра?</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <div>
+          <h1 class="brand-title">CheTam</h1>
+          <p id="topbar-subtitle" class="brand-sub">Загрузка…</p>
+        </div>
+      </div>
+      <button id="refresh-btn" class="icon-btn" type="button" aria-label="Обновить">↻</button>
+    </header>
+
+    <main id="main-content" class="content">
+      <!-- TAB: DAY -->
+      <section id="tab-day" class="tab-panel active" aria-label="План дня">
+        <div id="week-strip" class="week-strip" role="tablist" aria-label="Дни недели"></div>
+
+        <div class="card progress-card">
+          <div class="progress-head">
+            <span id="day-title" class="card-title">Сегодня</span>
+            <span id="day-progress-label" class="progress-pct">0%</span>
+          </div>
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="day-progress-fill" class="progress-fill"></div>
+          </div>
+          <p id="day-progress-sub" class="muted-small">0 из 0 выполнено</p>
+        </div>
+
+        <form id="day-quick-add" class="quick-form" autocomplete="off">
+          <input id="day-add-input" class="input" type="text" placeholder="Добавить задачу (или сразу кучу мыслей)…" required />
+          <button class="btn-primary" type="submit">＋</button>
+        </form>
+
+        <div id="day-schedule-block" class="section-block hidden">
+          <h2 class="section-heading">🎓 Расписание учёбы</h2>
+          <div id="day-schedule-list" class="item-list"></div>
+        </div>
+
+        <div class="section-block">
+          <h2 class="section-heading">📋 Задачи</h2>
+          <div id="day-task-list" class="item-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB: INBOX -->
+      <section id="tab-inbox" class="tab-panel" aria-label="Инбокс">
+        <div class="card dump-card">
+          <h2 class="card-title">🧠 Скинь всё в кучу</h2>
+          <p class="muted-small">Пиши сплошным текстом — CheTam сам разобьёт на задачи, вытащит время, даты и срочность.</p>
+          <form id="inbox-dump-form" class="dump-form">
+            <textarea id="inbox-dump-input" class="textarea" rows="3" placeholder="Например: надо сделать лабу, потом купить кофе, завтра в 18:00 зал и срочно отправить отчёт" required></textarea>
+            <button class="btn-primary btn-full" type="submit">Разобрать и сохранить</button>
+          </form>
+        </div>
+
+        <div class="section-block">
+          <h2 id="inbox-heading" class="section-heading">📥 Входящие</h2>
+          <div id="inbox-list" class="item-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB: EVENING -->
+      <section id="tab-evening" class="tab-panel" aria-label="Вечернее планирование">
+        <div class="card evening-hero">
+          <div class="evening-hero-top">
+            <div>
+              <h2 class="card-title">🌙 Вечерний ритуал</h2>
+              <p id="evening-today-summary" class="muted-small">Подводим итоги дня и собираем завтра</p>
+            </div>
+            <button id="carry-all-btn" class="btn-secondary hidden" type="button">➡️ Все на завтра</button>
+          </div>
+          <div id="evening-pending-list" class="item-list"></div>
+        </div>
+
+        <div class="section-block">
+          <h2 id="evening-tomorrow-heading" class="section-heading">🌅 Завтра: пары и план</h2>
+          <div id="evening-tomorrow-schedule" class="item-list"></div>
+          <div id="evening-tomorrow-tasks" class="item-list"></div>
+        </div>
+
+        <div class="section-block">
+          <h2 class="section-heading">📥 Забрать из Инбокса на завтра</h2>
+          <div id="evening-inbox-picker" class="item-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB: HISTORY -->
+      <section id="tab-history" class="tab-panel" aria-label="История и статистика">
+        <div class="segment-control" role="tablist">
+          <button id="stats-7-btn" class="segment-btn active" type="button" data-days="7">7 дней</button>
+          <button id="stats-30-btn" class="segment-btn" type="button" data-days="30">30 дней</button>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="card kpi-card">
+            <span class="kpi-label">Выполнено</span>
+            <strong id="kpi-rate" class="kpi-val">0%</strong>
+            <span id="kpi-ratio" class="muted-small">0 / 0</span>
+          </div>
+          <div class="card kpi-card">
+            <span class="kpi-label">Серия (стрик)</span>
+            <strong id="kpi-streak" class="kpi-val">0 дн.</strong>
+            <span class="muted-small">🔥 подряд</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Активность по дням</h2>
+          <p class="muted-small">Нажми на любой столбик, чтобы посмотреть детали дня</p>
+          <div id="history-bars" class="bar-chart"></div>
+        </div>
+
+        <div id="history-day-card" class="card">
+          <h2 id="history-day-title" class="card-title">Детали дня</h2>
+          <div id="history-day-details" class="history-details"></div>
+        </div>
+      </section>
+
+      <!-- AUTH FALLBACK -->
+      <section id="auth-error" class="card hidden">
+        <h2 class="card-title">🔒 Открой внутри Telegram</h2>
+        <p id="auth-error-msg" class="muted-small">Это личное приложение работает только при запуске из @chetam_plan_bot.</p>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Навигация">
+      <button class="nav-btn active" type="button" data-tab="day">
+        <span class="nav-icon">📅</span>
+        <span class="nav-label">День</span>
+      </button>
+      <button class="nav-btn" type="button" data-tab="inbox">
+        <span class="nav-icon">📥</span>
+        <span class="nav-label">Инбокс</span>
+        <span id="nav-inbox-badge" class="badge hidden">0</span>
+      </button>
+      <button class="nav-btn" type="button" data-tab="evening">
+        <span class="nav-icon">🌙</span>
+        <span class="nav-label">Вечер</span>
+      </button>
+      <button class="nav-btn" type="button" data-tab="history">
+        <span class="nav-icon">📊</span>
+        <span class="nav-label">История</span>
+      </button>
+    </nav>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
