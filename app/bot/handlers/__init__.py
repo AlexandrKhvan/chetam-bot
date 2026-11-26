@@ -5,6 +5,8 @@ from app.bot.handlers import (
     history,
     inbox,
     planning,
+    pool,
+    reminders,
     schedule,
     settings,
     start,
@@ -16,6 +18,8 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(common.router)
     dp.include_router(start.router)
     dp.include_router(settings.router)
+    dp.include_router(reminders.router)
+    dp.include_router(pool.router)
     dp.include_router(schedule.router)
     dp.include_router(planning.router)
     dp.include_router(inbox.router)

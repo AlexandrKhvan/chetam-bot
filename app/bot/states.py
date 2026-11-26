@@ -5,6 +5,15 @@ class AddTaskStates(StatesGroup):
     waiting_title = State()
 
 
+class AddPoolTaskStates(StatesGroup):
+    waiting_title = State()
+
+
+class AddReminderStates(StatesGroup):
+    waiting_input = State()
+    waiting_task_time = State()
+
+
 class AddScheduleEventStates(StatesGroup):
     waiting_input = State()
 

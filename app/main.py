@@ -17,31 +17,40 @@ from app.config import load_settings
 from app.db.database import Database
 from app.services.history_service import HistoryService
 from app.services.parsers.vision_parser import VisionScheduleParser
+from app.services.reminder_service import ReminderService
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 
-
+# Strictly <= 512 chars (Telegram Bot API limit)
 BOT_DESCRIPTION = (
-    "CheTam («Чё там на завтра?») — твой личный планировщик дня, инбокс и трекер учёбы.\n\n"
-    "• Скидывай мысли прямо в чат (хоть всё в кучу одним сообщением) — бот сам разобьёт их на задачи.\n"
-    "• Загружай .docx или фото расписания на неделю — пары подтянутся автоматически.\n"
-    "• Вечером собирай план на завтра за 1 минуту, днём отмечай галочки и смотри историю и стрик.\n"
-    "• Открывай интерактивный Mini App прямо внутри Telegram."
+    "CheTam («Чё там на завтра?») — личный планировщик дня, инбокс, пул задач и учебный трекер.\n\n"
+    "🧠 Пиши всё в кучу — сам разобью на задачи с датами и срочностью\n"
+    "📥 Инбокс + 🗂 Общий пул задач «на потом»\n"
+    "🎓 Импорт расписания из .docx и фото с фильтром группы\n"
+    "🌙 Вечерний ритуал сборки завтрашнего дня\n"
+    "🔔 Напоминания, Snooze и уведомления за 15 мин до пар\n"
+    "📊 История по дням, стрик 🔥 и встроенный Mini App"
 )
 
-BOT_SHORT_DESCRIPTION = "Личный планировщик дня, инбокс мыслей, расписание учёбы и вечерний ритуал."
+# Strictly <= 120 chars (Telegram Bot API limit)
+BOT_SHORT_DESCRIPTION = (
+    "Планировщик дня, пул задач, разбор «кучи мыслей», расписание из .docx, напоминания и Mini App."
+)
 
 
 async def _configure_bot_profile(bot: Bot, webapp_url: str) -> None:
     commands = [
         BotCommand(command="today", description="📅 План на сегодня"),
         BotCommand(command="tomorrow", description="🌅 План на завтра"),
-        BotCommand(command="inbox", description="📥 Входящие мысли и задачи"),
+        BotCommand(command="inbox", description="📥 Входящие мысли"),
+        BotCommand(command="pool", description="🗂 Общий пул задач"),
         BotCommand(command="plan", description="🌙 Вечернее планирование"),
+        BotCommand(command="remind", description="🔔 Создать напоминание"),
+        BotCommand(command="reminders", description="⏰ Активные напоминания"),
         BotCommand(command="schedule", description="🎓 Расписание учёбы"),
         BotCommand(command="history", description="📊 История и статистика"),
-        BotCommand(command="settings", description="⚙️ Настройки и напоминания"),
-        BotCommand(command="cancel", description="Отменить текущий ввод"),
+        BotCommand(command="settings", description="⚙️ Настройки и уведомления"),
+        BotCommand(command="help", description="✨ Все возможности бота"),
     ]
     await bot.set_my_commands(commands)
     try:
@@ -76,6 +85,7 @@ async def run_bot() -> None:
     task_service = TaskService(db)
     schedule_service = ScheduleService(db)
     history_service = HistoryService(db)
+    reminder_service = ReminderService(db)
     vision_parser = VisionScheduleParser(settings)
 
     bot = Bot(
@@ -84,12 +94,12 @@ async def run_bot() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Inject shared dependencies into all handlers
     dp["db"] = db
     dp["settings"] = settings
     dp["task_service"] = task_service
     dp["schedule_service"] = schedule_service
     dp["history_service"] = history_service
+    dp["reminder_service"] = reminder_service
     dp["vision_parser"] = vision_parser
 
     middleware = UserContextMiddleware(db=db, settings=settings)
@@ -98,7 +108,13 @@ async def run_bot() -> None:
 
     register_handlers(dp)
 
-    scheduler = ReminderScheduler(bot=bot, db=db, task_service=task_service)
+    scheduler = ReminderScheduler(
+        bot=bot,
+        db=db,
+        task_service=task_service,
+        schedule_service=schedule_service,
+        reminder_service=reminder_service,
+    )
 
     await _configure_bot_profile(bot, settings.webapp_url)
     scheduler.start()

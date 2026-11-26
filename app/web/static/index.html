@@ -38,7 +38,7 @@
         </div>
 
         <form id="day-quick-add" class="quick-form" autocomplete="off">
-          <input id="day-add-input" class="input" type="text" placeholder="Добавить задачу (или сразу кучу мыслей)…" required />
+          <input id="day-add-input" class="input" type="text" placeholder="Добавить задачу (или кучу мыслей)…" required />
           <button class="btn-primary" type="submit">＋</button>
         </form>
 
@@ -53,14 +53,19 @@
         </div>
       </section>
 
-      <!-- TAB: INBOX -->
-      <section id="tab-inbox" class="tab-panel" aria-label="Инбокс">
+      <!-- TAB: INBOX & POOL -->
+      <section id="tab-inbox" class="tab-panel" aria-label="Инбокс и пул задач">
+        <div class="segment-control" role="tablist">
+          <button id="bucket-inbox-btn" class="segment-btn active" type="button" data-bucket="inbox">📥 Инбокс</button>
+          <button id="bucket-pool-btn" class="segment-btn" type="button" data-bucket="pool">🗂 Пул задач</button>
+        </div>
+
         <div class="card dump-card">
-          <h2 class="card-title">🧠 Скинь всё в кучу</h2>
-          <p class="muted-small">Пиши сплошным текстом — CheTam сам разобьёт на задачи, вытащит время, даты и срочность.</p>
+          <h2 id="dump-title" class="card-title">🧠 Скинь всё в кучу</h2>
+          <p id="dump-hint" class="muted-small">Пиши сплошным текстом — CheTam сам разобьёт на задачи, вытащит время, даты и срочность.</p>
           <form id="inbox-dump-form" class="dump-form">
             <textarea id="inbox-dump-input" class="textarea" rows="3" placeholder="Например: надо сделать лабу, потом купить кофе, завтра в 18:00 зал и срочно отправить отчёт" required></textarea>
-            <button class="btn-primary btn-full" type="submit">Разобрать и сохранить</button>
+            <button id="dump-submit-btn" class="btn-primary btn-full" type="submit">Разобрать в Инбокс</button>
           </form>
         </div>
 
@@ -90,8 +95,28 @@
         </div>
 
         <div class="section-block">
-          <h2 class="section-heading">📥 Забрать из Инбокса на завтра</h2>
-          <div id="evening-inbox-picker" class="item-list"></div>
+          <div class="segment-control" role="tablist">
+            <button id="evn-src-inbox" class="segment-btn active" type="button" data-source="inbox">📥 Из Инбокса</button>
+            <button id="evn-src-pool" class="segment-btn" type="button" data-source="pool">🗂 Взять из Пула</button>
+          </div>
+          <div id="evening-source-picker" class="item-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB: REMINDERS -->
+      <section id="tab-reminders" class="tab-panel" aria-label="Напоминания">
+        <div class="card">
+          <h2 class="card-title">🔔 Новое напоминание</h2>
+          <p class="muted-small">Пиши как человеку: «через 30 мин выключить плиту», «завтра в 10:00 отчёт», «каждый день в 22:00 витамины».</p>
+          <form id="reminder-create-form" class="dump-form">
+            <input id="reminder-input" class="input" style="margin-top:10px" type="text" placeholder="через 30 мин выключить плиту…" required />
+            <button class="btn-primary btn-full" type="submit">Создать напоминание</button>
+          </form>
+        </div>
+
+        <div class="section-block">
+          <h2 id="reminders-heading" class="section-heading">⏰ Активные напоминания</h2>
+          <div id="reminders-list" class="item-list"></div>
         </div>
       </section>
 
@@ -140,13 +165,18 @@
         <span class="nav-label">День</span>
       </button>
       <button class="nav-btn" type="button" data-tab="inbox">
-        <span class="nav-icon">📥</span>
-        <span class="nav-label">Инбокс</span>
+        <span class="nav-icon">🗂</span>
+        <span class="nav-label">Пул</span>
         <span id="nav-inbox-badge" class="badge hidden">0</span>
       </button>
       <button class="nav-btn" type="button" data-tab="evening">
         <span class="nav-icon">🌙</span>
         <span class="nav-label">Вечер</span>
+      </button>
+      <button class="nav-btn" type="button" data-tab="reminders">
+        <span class="nav-icon">🔔</span>
+        <span class="nav-label">Напомн.</span>
+        <span id="nav-rem-badge" class="badge hidden">0</span>
       </button>
       <button class="nav-btn" type="button" data-tab="history">
         <span class="nav-icon">📊</span>

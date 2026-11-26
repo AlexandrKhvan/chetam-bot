@@ -97,6 +97,20 @@ async def cb_inbox_done(
     await callback.answer("Отмечено выполненным ✅")
 
 
+@router.callback_query(F.data.startswith("inb:pool:"))
+async def cb_inbox_to_pool(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    _, _, task_id_s, page_s = callback.data.split(":")
+    await task_service.move_to_pool(user_profile.user_id, int(task_id_s))
+    text, kb = await _render_inbox_view(task_service, user_profile, page=int(page_s))
+    if callback.message:
+        await safe_edit(callback.message, text, kb)
+    await callback.answer("Перенесено в общий пул 🗂")
+
+
 @router.callback_query(F.data.startswith("inb:del:"))
 async def cb_inbox_delete(
     callback: CallbackQuery,

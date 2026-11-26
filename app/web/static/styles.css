@@ -510,8 +510,8 @@ html, body {
   width: 100%;
   max-width: 560px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  padding: 8px 8px calc(10px + env(safe-area-inset-bottom, 0px));
+  grid-template-columns: repeat(5, 1fr);
+  padding: 8px 4px calc(10px + env(safe-area-inset-bottom, 0px));
   background: color-mix(in srgb, var(--surface) 92%, transparent);
   backdrop-filter: blur(18px);
   border-top: 1px solid var(--border);

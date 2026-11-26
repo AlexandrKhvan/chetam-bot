@@ -8,10 +8,12 @@ from app.db.models import (
     DayPlan,
     ParsedScheduleItem,
     PeriodStats,
+    Reminder,
     ScheduleEvent,
     Task,
     UserProfile,
 )
+from app.services.reminder_service import format_reminder_time_local
 from app.services.time_utils import format_date_ru, format_weekday_short_ru
 
 PRIORITY_ICON = {1: "🔴", 2: "🟡", 3: "⚪"}
@@ -88,16 +90,82 @@ def render_inbox(tasks: list[Task], page: int = 0, page_size: int = 6) -> str:
     if not tasks:
         lines.append("")
         lines.append("<i>Инбокс пуст — голова свободна! ✨</i>")
-        lines.append("Просто напиши сюда любую мысль или задачу, и я сразу сохраню её.")
+        lines.append("Просто напиши сюда любую мысль или задачу (хоть всё в кучу), и я сразу сохраню её.")
         return "\n".join(lines)
 
     start = page * page_size
     chunk = tasks[start : start + page_size]
-    lines.append("<i>Быстро перекинь задачи на сегодня/завтра или разбери их вечером.</i>")
+    lines.append("<i>Перекинь на сегодня/завтра, убери в 🗂 Пул «когда-нибудь» или разбери вечером.</i>")
     lines.append("")
     for idx, task in enumerate(chunk, start=start + 1):
         prio = PRIORITY_ICON.get(task.priority, "🟡")
         lines.append(f"{idx}. {prio} {escape(task.title)}")
+    return "\n".join(lines)
+
+
+def render_pool(tasks: list[Task], page: int = 0, page_size: int = 6) -> str:
+    total = len(tasks)
+    lines = [f"🗂 <b>Общий пул задач</b> ({total})"]
+    if not tasks:
+        lines.append("")
+        lines.append("<i>Пул пока пуст.</i>")
+        lines.append(
+            "Сюда удобно складывать дела «на потом / когда будет время», чтобы не засорять Инбокс "
+            "и спокойно забирать их в план вечером."
+        )
+        return "\n".join(lines)
+
+    start = page * page_size
+    chunk = tasks[start : start + page_size]
+    lines.append("<i>Задачи без жёсткой даты. Забирай их на сегодня/завтра или на вечернем планировании.</i>")
+    lines.append("")
+    for idx, task in enumerate(chunk, start=start + 1):
+        prio = PRIORITY_ICON.get(task.priority, "🟡")
+        lines.append(f"{idx}. {prio} {escape(task.title)}")
+    return "\n".join(lines)
+
+
+def render_evening_pool_picker(
+    tomorrow_plan: DayPlan, pool_tasks: list[Task], today_iso: str, page: int = 0, page_size: int = 8
+) -> str:
+    lines = [
+        "🗂 <b>Выбор из общего пула на завтра</b>",
+        f"🌅 <b>{escape(format_date_ru(tomorrow_plan.day, today_iso))}</b> · в плане уже {len(tomorrow_plan.tasks)} задач",
+        "",
+    ]
+    if not pool_tasks:
+        lines.append("<i>В пуле пока нет задач. Можно добавить новую или вернуться к плану на завтра.</i>")
+        return "\n".join(lines)
+
+    lines.append(f"<i>Нажми на задачу ниже — она сразу перейдёт в план на завтра (в пуле: {len(pool_tasks)}):</i>")
+    lines.append("")
+    start = page * page_size
+    for idx, t in enumerate(pool_tasks[start : start + page_size], start=start + 1):
+        prio = PRIORITY_ICON.get(t.priority, "🟡")
+        lines.append(f"{idx}. {prio} {escape(t.title)}")
+    return "\n".join(lines)
+
+
+def render_reminders(reminders: list[Reminder], tz_name: str) -> str:
+    lines = [f"🔔 <b>Активные напоминания</b> ({len(reminders)})"]
+    if not reminders:
+        lines.append("")
+        lines.append("<i>Пока нет активных напоминаний.</i>")
+        lines.append(
+            "Нажми <b>➕ Напоминание</b> или напиши команду:\n"
+            "• <code>/remind через 30 мин выключить плиту</code>\n"
+            "• <code>/remind завтра в 10:00 сдать отчёт</code>\n"
+            "• <code>/remind каждый день в 22:00 пить витамины</code>"
+        )
+        return "\n".join(lines)
+
+    lines.append("")
+    for idx, rem in enumerate(reminders[:12], start=1):
+        when = format_reminder_time_local(rem.remind_at_utc, tz_name)
+        rep = " 🔁" if rem.repeat_rule == "daily" else ""
+        lines.append(f"{idx}. <b>{escape(when)}</b>{rep} — {escape(rem.text)}")
+    if len(reminders) > 12:
+        lines.append(f"<i>…и ещё {len(reminders) - 12}</i>")
     return "\n".join(lines)
 
 
@@ -282,6 +350,7 @@ def render_period_stats(stats: PeriodStats) -> str:
 def render_settings(user: UserProfile, vision_enabled: bool) -> str:
     ev_state = "вкл ✅" if user.evening_reminder_enabled else "выкл 🔕"
     mo_state = "вкл ✅" if user.morning_digest_enabled else "выкл 🔕"
+    cls_state = f"за {user.class_reminder_minutes} мин ✅" if user.class_reminder_minutes > 0 else "выкл 🔕"
     vision_state = "подключён ✅" if vision_enabled else "не настроен (только .docx и ручной ввод)"
     grp_label = escape(user.study_group) if user.study_group else "не выбрана (все)"
     return "\n".join(
@@ -292,6 +361,7 @@ def render_settings(user: UserProfile, vision_enabled: bool) -> str:
             f"🎓 Учебная группа: <b>{grp_label}</b>",
             f"🌙 Вечернее планирование: <b>{escape(user.evening_plan_time)}</b> ({ev_state})",
             f"☀️ Утренняя сводка: <b>{escape(user.morning_digest_time)}</b> ({mo_state})",
+            f"🔔 Напоминание о парах: <b>{cls_state}</b>",
             f"📷 Распознавание фото (AI): {vision_state}",
         ]
     )

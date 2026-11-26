@@ -11,6 +11,8 @@
     selectedDay: "",
     weekDays: [],
     activeTab: "day",
+    activeBucket: "inbox", // inbox | pool
+    eveningSource: "inbox", // inbox | pool
     historyDays: 7,
     selectedHistoryDay: "",
   };
@@ -25,11 +27,11 @@
 
   let toastTimer = null;
   function showToast(msg) {
-    const el = document.getElementById("toast");
-    el.textContent = msg;
-    el.classList.add("show");
+    const elNode = document.getElementById("toast");
+    elNode.textContent = msg;
+    elNode.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+    toastTimer = setTimeout(() => elNode.classList.remove("show"), 2300);
   }
 
   async function api(path, options = {}) {
@@ -61,14 +63,21 @@
     return node;
   }
 
-  function updateInboxBadge(count) {
-    const badge = document.getElementById("nav-inbox-badge");
+  function setBadge(id, count) {
+    const badge = document.getElementById(id);
+    if (!badge) return;
     if (count > 0) {
       badge.textContent = String(count);
       badge.classList.remove("hidden");
     } else {
       badge.classList.add("hidden");
     }
+  }
+
+  function shiftIso(iso, delta) {
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + delta));
+    return dt.toISOString().slice(0, 10);
   }
 
   function renderWeekStrip() {
@@ -138,10 +147,25 @@
     if (meta.childNodes.length > 0) body.appendChild(meta);
 
     const actions = el("div", "item-actions");
+    const makeRemindBtn = () => {
+      const btn = el("button", "mini-btn", "🔔");
+      btn.type = "button";
+      btn.title = "Напомнить через 1 час";
+      btn.addEventListener("click", async () => {
+        haptic("light");
+        const res = await api(`/api/tasks/${task.id}/remind`, {
+          method: "POST",
+          body: JSON.stringify({ preset: "1h" }),
+        });
+        showToast(`🔔 Напомню: ${res.reminder.when_label}`);
+        await loadBadges();
+      });
+      return btn;
+    };
+
     if (options.mode === "day") {
       const prioBtn = el("button", "mini-btn", task.priority === 1 ? "🔴" : task.priority === 3 ? "⚪" : "🟡");
       prioBtn.type = "button";
-      prioBtn.title = "Приоритет";
       prioBtn.addEventListener("click", async () => {
         haptic("light");
         await api(`/api/tasks/${task.id}/priority`, { method: "POST" });
@@ -164,15 +188,14 @@
 
       const delBtn = el("button", "mini-btn danger", "✕");
       delBtn.type = "button";
-      delBtn.title = "Удалить";
       delBtn.addEventListener("click", async () => {
         haptic("light");
         await api(`/api/tasks/${task.id}`, { method: "DELETE" });
         await options.onRefresh();
       });
 
-      actions.append(prioBtn, moveBtn, delBtn);
-    } else if (options.mode === "inbox") {
+      actions.append(makeRemindBtn(), prioBtn, moveBtn, delBtn);
+    } else if (options.mode === "inbox" || options.mode === "pool") {
       const todayBtn = el("button", "mini-btn", "📅");
       todayBtn.type = "button";
       todayBtn.title = "На сегодня";
@@ -199,6 +222,22 @@
         await options.onRefresh();
       });
 
+      actions.append(todayBtn, tomBtn);
+      if (options.mode === "inbox") {
+        const poolBtn = el("button", "mini-btn", "🗂");
+        poolBtn.type = "button";
+        poolBtn.title = "В общий пул";
+        poolBtn.addEventListener("click", async () => {
+          haptic("light");
+          await api(`/api/tasks/${task.id}/pool`, { method: "POST" });
+          showToast("Перенесено в общий пул 🗂");
+          await options.onRefresh();
+        });
+        actions.append(poolBtn);
+      } else {
+        actions.append(makeRemindBtn());
+      }
+
       const delBtn = el("button", "mini-btn danger", "✕");
       delBtn.type = "button";
       delBtn.addEventListener("click", async () => {
@@ -206,8 +245,7 @@
         await api(`/api/tasks/${task.id}`, { method: "DELETE" });
         await options.onRefresh();
       });
-
-      actions.append(todayBtn, tomBtn, delBtn);
+      actions.append(delBtn);
     } else if (options.mode === "evening-pending") {
       const moveBtn = el("button", "mini-btn", "➡️ Завтра");
       moveBtn.type = "button";
@@ -219,7 +257,17 @@
         });
         await options.onRefresh();
       });
-      actions.append(moveBtn);
+
+      const poolBtn = el("button", "mini-btn", "🗂");
+      poolBtn.type = "button";
+      poolBtn.title = "В пул";
+      poolBtn.addEventListener("click", async () => {
+        haptic("light");
+        await api(`/api/tasks/${task.id}/pool`, { method: "POST" });
+        showToast("Убрано в общий пул");
+        await options.onRefresh();
+      });
+      actions.append(moveBtn, poolBtn);
     } else if (options.mode === "evening-pick") {
       const pickBtn = el("button", "mini-btn", "＋ Завтра");
       pickBtn.type = "button";
@@ -229,7 +277,7 @@
           method: "POST",
           body: JSON.stringify({ target_date: state.tomorrow }),
         });
-        showToast("Добавлено в план на завтра");
+        showToast("Добавлено в план на завтра ✅");
         await options.onRefresh();
       });
       actions.append(pickBtn);
@@ -243,10 +291,10 @@
     return row;
   }
 
-  function shiftIso(iso, delta) {
-    const [y, m, d] = iso.split("-").map(Number);
-    const dt = new Date(Date.UTC(y, m - 1, d + delta));
-    return dt.toISOString().slice(0, 10);
+  async function loadBadges() {
+    const [inboxData, remData] = await Promise.all([api("/api/inbox"), api("/api/reminders")]);
+    setBadge("nav-inbox-badge", inboxData.tasks.length);
+    setBadge("nav-rem-badge", remData.reminders.length);
   }
 
   async function loadDay(dayIso) {
@@ -271,7 +319,7 @@
     const taskList = document.getElementById("day-task-list");
     taskList.replaceChildren();
     if (data.tasks.length === 0) {
-      taskList.appendChild(el("div", "empty-state", "На этот день задач пока нет — добавь выше или забери из Инбокса ✨"));
+      taskList.appendChild(el("div", "empty-state", "На этот день задач пока нет — добавь выше или забери из Пула ✨"));
     } else {
       data.tasks.forEach((t) => {
         taskList.appendChild(buildTaskRow(t, { mode: "day", onRefresh: () => refreshAll() }));
@@ -279,35 +327,50 @@
     }
   }
 
-  async function loadInbox() {
-    const data = await api("/api/inbox");
-    updateInboxBadge(data.tasks.length);
-    document.getElementById("inbox-heading").textContent = `📥 Входящие (${data.tasks.length})`;
+  async function loadBucket() {
+    const [inboxData, poolData] = await Promise.all([api("/api/inbox"), api("/api/pool")]);
+    setBadge("nav-inbox-badge", inboxData.tasks.length);
+    document.getElementById("bucket-inbox-btn").textContent = `📥 Инбокс (${inboxData.tasks.length})`;
+    document.getElementById("bucket-pool-btn").textContent = `🗂 Пул задач (${poolData.tasks.length})`;
+
+    const isPool = state.activeBucket === "pool";
+    document.getElementById("dump-title").textContent = isPool ? "🗂 Добавить в общий пул" : "🧠 Скинь всё в кучу";
+    document.getElementById("dump-hint").textContent = isPool
+      ? "Дела «на потом / когда будет время» — их удобно забирать в план на вечернем планировании."
+      : "Пиши сплошным текстом — CheTam сам разобьёт на задачи, вытащит время, даты и срочность.";
+    document.getElementById("dump-submit-btn").textContent = isPool ? "Сохранить в Пул" : "Разобрать в Инбокс";
+
+    const tasks = isPool ? poolData.tasks : inboxData.tasks;
+    document.getElementById("inbox-heading").textContent = isPool
+      ? `🗂 Общий пул задач (${tasks.length})`
+      : `📥 Входящие (${tasks.length})`;
+
     const list = document.getElementById("inbox-list");
     list.replaceChildren();
-    if (data.tasks.length === 0) {
-      list.appendChild(el("div", "empty-state", "Инбокс пуст — голова свободна ✨"));
+    if (tasks.length === 0) {
+      list.appendChild(
+        el("div", "empty-state", isPool ? "Общий пул пуст — сюда можно парковать дела «на потом»." : "Инбокс пуст — голова свободна ✨")
+      );
       return;
     }
-    data.tasks.forEach((t) => {
-      list.appendChild(buildTaskRow(t, { mode: "inbox", onRefresh: () => refreshAll() }));
+    tasks.forEach((t) => {
+      list.appendChild(buildTaskRow(t, { mode: state.activeBucket, onRefresh: () => loadBucket() }));
     });
   }
 
   async function loadEvening() {
-    const [todayData, tomData, inboxData] = await Promise.all([
+    const [todayData, tomData, inboxData, poolData] = await Promise.all([
       api(`/api/day?date=${encodeURIComponent(state.today)}`),
       api(`/api/day?date=${encodeURIComponent(state.tomorrow)}`),
       api("/api/inbox"),
+      api("/api/pool"),
     ]);
-    updateInboxBadge(inboxData.tasks.length);
+    setBadge("nav-inbox-badge", inboxData.tasks.length);
 
     const pending = todayData.tasks.filter((t) => t.status === "planned");
     document.getElementById("evening-today-summary").textContent =
       `Сегодня закрыто ${todayData.done_items}/${todayData.total_items} (${todayData.completion_rate}%)`;
-
-    const carryAllBtn = document.getElementById("carry-all-btn");
-    carryAllBtn.classList.toggle("hidden", pending.length === 0);
+    document.getElementById("carry-all-btn").classList.toggle("hidden", pending.length === 0);
 
     const pendList = document.getElementById("evening-pending-list");
     pendList.replaceChildren();
@@ -329,22 +392,74 @@
     const tomTasks = document.getElementById("evening-tomorrow-tasks");
     tomTasks.replaceChildren();
     if (tomData.tasks.length === 0 && tomData.schedule_events.length === 0) {
-      tomTasks.appendChild(el("div", "empty-state", "На завтра пока пусто — выбери задачи ниже."));
+      tomTasks.appendChild(el("div", "empty-state", "На завтра пока пусто — забери задачи из Инбокса или Пула ниже."));
     } else {
       tomData.tasks.forEach((t) => {
         tomTasks.appendChild(buildTaskRow(t, { mode: "day", onRefresh: () => loadEvening() }));
       });
     }
 
-    const picker = document.getElementById("evening-inbox-picker");
+    document.getElementById("evn-src-inbox").textContent = `📥 Из Инбокса (${inboxData.tasks.length})`;
+    document.getElementById("evn-src-pool").textContent = `🗂 Взять из Пула (${poolData.tasks.length})`;
+
+    const picker = document.getElementById("evening-source-picker");
     picker.replaceChildren();
-    if (inboxData.tasks.length === 0) {
-      picker.appendChild(el("div", "empty-state", "Инбокс пуст — всё уже разобрано."));
+    const srcTasks = state.eveningSource === "pool" ? poolData.tasks : inboxData.tasks;
+    if (srcTasks.length === 0) {
+      picker.appendChild(
+        el("div", "empty-state", state.eveningSource === "pool" ? "В пуле задач пока пусто." : "Инбокс пуст — посмотри во вкладке «Взять из Пула»!")
+      );
     } else {
-      inboxData.tasks.forEach((t) => {
+      srcTasks.forEach((t) => {
         picker.appendChild(buildTaskRow(t, { mode: "evening-pick", onRefresh: () => loadEvening() }));
       });
     }
+  }
+
+  async function loadReminders() {
+    const data = await api("/api/reminders");
+    setBadge("nav-rem-badge", data.reminders.length);
+    document.getElementById("reminders-heading").textContent = `⏰ Активные напоминания (${data.reminders.length})`;
+    const list = document.getElementById("reminders-list");
+    list.replaceChildren();
+    if (data.reminders.length === 0) {
+      list.appendChild(el("div", "empty-state", "Нет активных напоминаний — создай выше или нажми 🔔 на любой задаче."));
+      return;
+    }
+    data.reminders.forEach((rem) => {
+      const row = el("div", "item-row");
+      const body = el("div", "item-body");
+      body.appendChild(el("p", "item-title", rem.text));
+      const meta = el("div", "item-meta");
+      meta.appendChild(el("span", "chip time", rem.when_label));
+      if (rem.repeat_rule === "daily") meta.appendChild(el("span", "chip", "🔁 ежедневно"));
+      body.appendChild(meta);
+
+      const actions = el("div", "item-actions");
+      const snzBtn = el("button", "mini-btn", "💤 +15м");
+      snzBtn.type = "button";
+      snzBtn.addEventListener("click", async () => {
+        haptic("light");
+        await api(`/api/reminders/${rem.id}/snooze`, {
+          method: "POST",
+          body: JSON.stringify({ minutes: 15 }),
+        });
+        showToast("Отложено на 15 мин 💤");
+        await loadReminders();
+      });
+
+      const delBtn = el("button", "mini-btn danger", "✕");
+      delBtn.type = "button";
+      delBtn.addEventListener("click", async () => {
+        haptic("light");
+        await api(`/api/reminders/${rem.id}`, { method: "DELETE" });
+        await loadReminders();
+      });
+
+      actions.append(snzBtn, delBtn);
+      row.append(body, actions);
+      list.appendChild(row);
+    });
   }
 
   async function loadHistory() {
@@ -398,18 +513,9 @@
       lines.forEach((txt) => box.appendChild(el("div", "hist-line", txt)));
     };
 
-    addGroup(
-      `✅ Выполнено (${data.completed_tasks.length})`,
-      data.completed_tasks.map((t) => t.title)
-    );
-    addGroup(
-      `➡️ Перенесено (${data.carried_over_events.length})`,
-      data.carried_over_events.map((e) => e.task_title)
-    );
-    addGroup(
-      `❌ Не выполнено (${data.pending_tasks.length})`,
-      data.pending_tasks.map((t) => t.title)
-    );
+    addGroup(`✅ Выполнено (${data.completed_tasks.length})`, data.completed_tasks.map((t) => t.title));
+    addGroup(`➡️ Перенесено (${data.carried_over_events.length})`, data.carried_over_events.map((e) => e.task_title));
+    addGroup(`❌ Не выполнено (${data.pending_tasks.length})`, data.pending_tasks.map((t) => t.title));
     addGroup(
       `🎓 Пары (${data.schedule_events.length})`,
       data.schedule_events.map((e) => `${e.is_done ? "✅" : "▫️"} ${e.start_time} ${e.title}`)
@@ -418,11 +524,13 @@
 
   async function refreshAll() {
     if (state.activeTab === "day") {
-      await Promise.all([loadDay(state.selectedDay), loadInbox()]);
+      await Promise.all([loadDay(state.selectedDay), loadBadges()]);
     } else if (state.activeTab === "inbox") {
-      await loadInbox();
+      await loadBucket();
     } else if (state.activeTab === "evening") {
       await loadEvening();
+    } else if (state.activeTab === "reminders") {
+      await loadReminders();
     } else if (state.activeTab === "history") {
       await loadHistory();
     }
@@ -464,6 +572,16 @@
       await refreshAll();
     });
 
+    document.querySelectorAll("#tab-inbox .segment-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        haptic("light");
+        state.activeBucket = btn.dataset.bucket;
+        document.querySelectorAll("#tab-inbox .segment-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        loadBucket().catch((err) => showToast(err.message));
+      });
+    });
+
     document.getElementById("inbox-dump-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const input = document.getElementById("inbox-dump-input");
@@ -472,11 +590,22 @@
       haptic("medium");
       const res = await api("/api/tasks/dump", {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, target_bucket: state.activeBucket }),
       });
       input.value = "";
-      showToast(res.count > 1 ? `🧠 Разобрал на ${res.count} задач` : "📥 Сохранено в инбокс");
-      await refreshAll();
+      const where = state.activeBucket === "pool" ? "в Пул" : "в Инбокс";
+      showToast(res.count > 1 ? `Разобрал ${res.count} задач ${where}` : `Сохранено ${where}`);
+      await loadBucket();
+    });
+
+    document.querySelectorAll("#tab-evening .segment-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        haptic("light");
+        state.eveningSource = btn.dataset.source;
+        document.querySelectorAll("#tab-evening .segment-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        loadEvening().catch((err) => showToast(err.message));
+      });
     });
 
     document.getElementById("carry-all-btn").addEventListener("click", async () => {
@@ -489,11 +618,30 @@
       await loadEvening();
     });
 
-    document.querySelectorAll(".segment-btn").forEach((btn) => {
+    document.getElementById("reminder-create-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("reminder-input");
+      const text = input.value.trim();
+      if (!text) return;
+      haptic("medium");
+      try {
+        const res = await api("/api/reminders", {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        });
+        input.value = "";
+        showToast(`🔔 Напомню: ${res.reminder.when_label}`);
+        await loadReminders();
+      } catch (err) {
+        showToast(err.message);
+      }
+    });
+
+    document.querySelectorAll("#tab-history .segment-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         haptic("light");
         state.historyDays = Number(btn.dataset.days);
-        document.querySelectorAll(".segment-btn").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll("#tab-history .segment-btn").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         loadHistory().catch((err) => showToast(err.message));
       });
@@ -509,7 +657,8 @@
       state.selectedDay = me.today;
       state.selectedHistoryDay = me.today;
       state.weekDays = me.week_days;
-      updateInboxBadge(me.inbox_count);
+      setBadge("nav-inbox-badge", me.inbox_count);
+      setBadge("nav-rem-badge", me.reminders_count);
 
       const name = me.user.first_name || me.user.username || "Привет";
       const grp = me.user.study_group ? ` · ${me.user.study_group}` : "";

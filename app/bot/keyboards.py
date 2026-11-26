@@ -8,13 +8,15 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from app.db.models import DayPlan, Task, UserProfile
+from app.db.models import DayPlan, Reminder, Task, UserProfile
 from app.services.time_utils import shift_date_iso
 
 BTN_TODAY = "📅 Сегодня"
 BTN_TOMORROW = "🌅 Завтра"
 BTN_INBOX = "📥 Инбокс"
+BTN_POOL = "🗂 Пул задач"
 BTN_PLAN = "🌙 Вечерний план"
+BTN_REMINDERS = "🔔 Напоминания"
 BTN_SCHEDULE = "🎓 Расписание"
 BTN_HISTORY = "📊 История"
 
@@ -27,11 +29,12 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_TOMORROW)],
-            [KeyboardButton(text=BTN_INBOX), KeyboardButton(text=BTN_PLAN)],
+            [KeyboardButton(text=BTN_INBOX), KeyboardButton(text=BTN_POOL)],
+            [KeyboardButton(text=BTN_PLAN), KeyboardButton(text=BTN_REMINDERS)],
             [KeyboardButton(text=BTN_SCHEDULE), KeyboardButton(text=BTN_HISTORY)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Напиши мысль/задачу или скинь .docx / фото расписания…",
+        input_field_placeholder="Напиши мысль/кучу задач или скинь .docx расписания…",
     )
 
 
@@ -39,12 +42,14 @@ def quick_capture_kb(task_id: int, today_iso: str, tomorrow_iso: str) -> InlineK
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📅 На сегодня", callback_data=f"qc:plan:{task_id}:{today_iso}"),
-                InlineKeyboardButton(text="🌅 На завтра", callback_data=f"qc:plan:{task_id}:{tomorrow_iso}"),
+                InlineKeyboardButton(text="📅 Сегодня", callback_data=f"qc:plan:{task_id}:{today_iso}"),
+                InlineKeyboardButton(text="🌅 Завтра", callback_data=f"qc:plan:{task_id}:{tomorrow_iso}"),
+                InlineKeyboardButton(text="🗂 В пул", callback_data=f"qc:pool:{task_id}"),
             ],
             [
+                InlineKeyboardButton(text="🔔 Напомнить", callback_data=f"rem:ask:{task_id}"),
                 InlineKeyboardButton(text="🔴 Важно", callback_data=f"qc:prio:{task_id}"),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"qc:del:{task_id}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"qc:del:{task_id}"),
             ],
         ]
     )
@@ -54,8 +59,9 @@ def brain_dump_batch_kb(batch_id: str, today_iso: str, tomorrow_iso: str) -> Inl
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📅 Все на сегодня", callback_data=f"bd:plan:{batch_id}:{today_iso}"),
-                InlineKeyboardButton(text="🌅 Все на завтра", callback_data=f"bd:plan:{batch_id}:{tomorrow_iso}"),
+                InlineKeyboardButton(text="📅 Все сегодня", callback_data=f"bd:plan:{batch_id}:{today_iso}"),
+                InlineKeyboardButton(text="🌅 Все завтра", callback_data=f"bd:plan:{batch_id}:{tomorrow_iso}"),
+                InlineKeyboardButton(text="🗂 Все в пул", callback_data=f"bd:pool:{batch_id}"),
             ],
             [
                 InlineKeyboardButton(text="🔗 Объединить в 1 задачу", callback_data=f"bd:merge:{batch_id}"),
@@ -97,8 +103,9 @@ def day_plan_kb(plan: DayPlan, today_iso: str) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(text="➕ Задача", callback_data=f"day:add:{plan.day}"),
-            InlineKeyboardButton(text="📥 Из инбокса", callback_data=f"day:pick:{plan.day}"),
-            InlineKeyboardButton(text="⚙️ Правка", callback_data=f"day:mgr:{plan.day}"),
+            InlineKeyboardButton(text="📥 Инбокс", callback_data=f"day:pick:{plan.day}"),
+            InlineKeyboardButton(text="🗂 Пул", callback_data=f"day:pool:{plan.day}"),
+            InlineKeyboardButton(text="⚙️", callback_data=f"day:mgr:{plan.day}"),
         ]
     )
     rows.append(
@@ -119,16 +126,20 @@ def day_manage_kb(plan: DayPlan) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"📌 {_clip(task.title, 22)}",
+                    text=f"📌 {_clip(task.title, 18)}",
                     callback_data=f"tk:prio:{task.id}:{plan.day}",
                 ),
                 InlineKeyboardButton(
-                    text="➡️ +1д",
+                    text="🔔",
+                    callback_data=f"rem:ask:{task.id}",
+                ),
+                InlineKeyboardButton(
+                    text="➡️",
                     callback_data=f"tk:mv:{task.id}:{plan.day}:{next_day}",
                 ),
                 InlineKeyboardButton(
-                    text="📥",
-                    callback_data=f"tk:inb:{task.id}:{plan.day}",
+                    text="🗂",
+                    callback_data=f"tk:pool:{task.id}:{plan.day}",
                 ),
                 InlineKeyboardButton(
                     text="🗑",
@@ -183,7 +194,7 @@ def inbox_kb(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"• {_clip(task.title, 18)}",
+                    text=f"• {_clip(task.title, 16)}",
                     callback_data=f"inb:prio:{task.id}:{page}",
                 ),
                 InlineKeyboardButton(
@@ -195,8 +206,8 @@ def inbox_kb(
                     callback_data=f"inb:plan:{task.id}:{tomorrow_iso}:{page}",
                 ),
                 InlineKeyboardButton(
-                    text="✅",
-                    callback_data=f"inb:done:{task.id}:{page}",
+                    text="🗂",
+                    callback_data=f"inb:pool:{task.id}:{page}",
                 ),
                 InlineKeyboardButton(
                     text="🗑",
@@ -219,17 +230,69 @@ def inbox_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def pool_kb(
+    tasks: list[Task], today_iso: str, tomorrow_iso: str, page: int = 0, page_size: int = 6
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    start = page * page_size
+    chunk = tasks[start : start + page_size]
+
+    for task in chunk:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"• {_clip(task.title, 16)}",
+                    callback_data=f"pl:prio:{task.id}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="📅",
+                    callback_data=f"pl:plan:{task.id}:{today_iso}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="🌅",
+                    callback_data=f"pl:plan:{task.id}:{tomorrow_iso}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="🔔",
+                    callback_data=f"rem:ask:{task.id}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑",
+                    callback_data=f"pl:del:{task.id}:{page}",
+                ),
+            ]
+        )
+
+    total_pages = max(1, (len(tasks) + page_size - 1) // page_size)
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=f"pl:pg:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=f"pl:pg:{page + 1}"))
+        rows.append(nav)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="➕ Добавить в пул", callback_data="pl:add"),
+            InlineKeyboardButton(text="🌙 Вечерний план", callback_data="evn:start"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def evening_step1_kb(
-    pending_tasks: list[Task], today_iso: str, tomorrow_iso: str
+    pending_tasks: list[Task], today_iso: str, tomorrow_iso: str, pool_count: int = 0
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for task in pending_tasks[:8]:
         rows.append(
             [
-                InlineKeyboardButton(text=_clip(task.title, 18), callback_data="noop"),
+                InlineKeyboardButton(text=_clip(task.title, 16), callback_data="noop"),
                 InlineKeyboardButton(text="✅", callback_data=f"evn:done:{task.id}"),
-                InlineKeyboardButton(text="➡️ Завтра", callback_data=f"evn:move:{task.id}"),
-                InlineKeyboardButton(text="📥", callback_data=f"evn:inb:{task.id}"),
+                InlineKeyboardButton(text="➡️", callback_data=f"evn:move:{task.id}"),
+                InlineKeyboardButton(text="🗂", callback_data=f"evn:topool:{task.id}"),
                 InlineKeyboardButton(text="🗑", callback_data=f"evn:del:{task.id}"),
             ]
         )
@@ -243,13 +306,19 @@ def evening_step1_kb(
                 )
             ]
         )
+    pool_label = f"🗂 Взять из пула ({pool_count})" if pool_count else "🗂 Взять из пула"
     rows.append(
-        [InlineKeyboardButton(text="Дальше: собрать завтра ▶️", callback_data="evn:step2")]
+        [
+            InlineKeyboardButton(text=pool_label, callback_data="evn:pool:0"),
+            InlineKeyboardButton(text="Собрать завтра ▶️", callback_data="evn:step2"),
+        ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def evening_step2_kb(inbox_tasks: list[Task], tomorrow_iso: str) -> InlineKeyboardMarkup:
+def evening_step2_kb(
+    inbox_tasks: list[Task], tomorrow_iso: str, pool_count: int = 0
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for task in inbox_tasks[:10]:
         rows.append(
@@ -260,18 +329,104 @@ def evening_step2_kb(inbox_tasks: list[Task], tomorrow_iso: str) -> InlineKeyboa
                 )
             ]
         )
+    pool_label = f"🗂 Взять из пула ({pool_count})" if pool_count else "🗂 Открыть пул задач"
     rows.append(
         [
-            InlineKeyboardButton(text="✏️ Новая задача на завтра", callback_data=f"day:add:{tomorrow_iso}"),
+            InlineKeyboardButton(text=pool_label, callback_data="evn:pool:0"),
+            InlineKeyboardButton(text="✏️ Новая задача", callback_data=f"day:add:{tomorrow_iso}"),
         ]
     )
     rows.append(
         [
-            InlineKeyboardButton(text="⬅️ Назад к итогам", callback_data="evn:start"),
-            InlineKeyboardButton(text="✅ Готово — открыть план", callback_data=f"day:show:{tomorrow_iso}"),
+            InlineKeyboardButton(text="⬅️ Итоги", callback_data="evn:start"),
+            InlineKeyboardButton(text="✅ Готово — план завтра", callback_data=f"day:show:{tomorrow_iso}"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def evening_pool_picker_kb(
+    pool_tasks: list[Task], tomorrow_iso: str, page: int = 0, page_size: int = 8
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    start = page * page_size
+    for task in pool_tasks[start : start + page_size]:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"➕ {_clip(task.title, 34)}",
+                    callback_data=f"evn:pickpool:{task.id}:{tomorrow_iso}:{page}",
+                )
+            ]
+        )
+
+    total_pages = max(1, (len(pool_tasks) + page_size - 1) // page_size)
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=f"evn:pool:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=f"evn:pool:{page + 1}"))
+        rows.append(nav)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ К вечернему плану", callback_data="evn:step2"),
+            InlineKeyboardButton(text="✅ План на завтра", callback_data=f"day:show:{tomorrow_iso}"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reminders_list_kb(reminders: list[Reminder]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for rem in reminders[:10]:
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"🔔 {_clip(rem.text, 24)}", callback_data="noop"),
+                InlineKeyboardButton(text="🗑", callback_data=f"rem:del:{rem.id}"),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="➕ Новое напоминание", callback_data="rem:new")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def task_remind_presets_kb(task_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏰ +15 мин", callback_data=f"rem:set:{task_id}:15m"),
+                InlineKeyboardButton(text="⏰ +1 час", callback_data=f"rem:set:{task_id}:1h"),
+            ],
+            [
+                InlineKeyboardButton(text="🌙 Сегодня 20:00", callback_data=f"rem:set:{task_id}:eve"),
+                InlineKeyboardButton(text="🌅 Завтра 09:00", callback_data=f"rem:set:{task_id}:tom"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Своё время", callback_data=f"rem:custom:{task_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="rem:cancel"),
+            ],
+        ]
+    )
+
+
+def reminder_fired_kb(reminder_id: int, task_id: int | None = None) -> InlineKeyboardMarkup:
+    top_row: list[InlineKeyboardButton] = []
+    if task_id:
+        top_row.append(InlineKeyboardButton(text="✅ Сделано", callback_data=f"rem:done:{reminder_id}:{task_id}"))
+    else:
+        top_row.append(InlineKeyboardButton(text="✅ Понял", callback_data=f"rem:ack:{reminder_id}"))
+    top_row.append(InlineKeyboardButton(text="💤 +15 мин", callback_data=f"rem:snz:{reminder_id}:15"))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            top_row,
+            [
+                InlineKeyboardButton(text="💤 +1 час", callback_data=f"rem:snz:{reminder_id}:60"),
+                InlineKeyboardButton(text="🌅 Завтра 09:00", callback_data=f"rem:snz:{reminder_id}:tom"),
+            ],
+        ]
+    )
 
 
 def schedule_week_kb(anchor_iso: str, start_iso: str, end_iso: str, today_iso: str) -> InlineKeyboardMarkup:
@@ -361,6 +516,11 @@ def history_stats_kb(today_iso: str) -> InlineKeyboardMarkup:
 def settings_kb(user: UserProfile) -> InlineKeyboardMarkup:
     ev_btn = "🔕 Выкл. вечернее" if user.evening_reminder_enabled else "🔔 Вкл. вечернее"
     mo_btn = "🔕 Выкл. утреннее" if user.morning_digest_enabled else "🔔 Вкл. утреннее"
+    cls_btn = (
+        f"🎓 Пары: за {user.class_reminder_minutes} мин"
+        if user.class_reminder_minutes > 0
+        else "🎓 Пары: выкл 🔕"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -372,7 +532,8 @@ def settings_kb(user: UserProfile) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🕒 Время утра", callback_data="set:time:morning"),
             ],
             [
-                InlineKeyboardButton(text="🌍 Изменить часовой пояс", callback_data="set:tz"),
+                InlineKeyboardButton(text=cls_btn, callback_data="set:tog:class"),
+                InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="set:tz"),
             ],
         ]
     )

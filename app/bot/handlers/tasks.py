@@ -177,6 +177,27 @@ async def cb_day_pick_inbox(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("day:pool:"))
+async def cb_day_pick_pool(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    target_day = callback.data.split(":")[2]
+    today_iso = user_today_iso(user_profile.timezone)
+    pool_tasks = await task_service.list_pool(user_profile.user_id)
+    if not pool_tasks:
+        await callback.answer("Пул задач пуст 🗂", show_alert=True)
+        return
+    if callback.message:
+        await safe_edit(
+            callback.message,
+            f"🗂 <b>Выбери задачи из общего пула на {escape(format_date_ru(target_day, today_iso))}:</b>",
+            pick_from_inbox_kb(pool_tasks, target_day, back_callback=f"day:show:{target_day}"),
+        )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("day:pull:"))
 async def cb_day_pull_from_inbox(
     callback: CallbackQuery,
@@ -276,6 +297,20 @@ async def cb_task_to_inbox(
     await callback.answer("Убрано в инбокс 📥")
 
 
+@router.callback_query(F.data.startswith("tk:pool:"))
+async def cb_task_to_pool(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    _, _, task_id_s, day_iso = callback.data.split(":")
+    await task_service.move_to_pool(user_profile.user_id, int(task_id_s), record_carry_over=True)
+    text, kb = await _render_day_view(task_service, user_profile, day_iso, manage_mode=True)
+    if callback.message:
+        await safe_edit(callback.message, text, kb)
+    await callback.answer("Убрано в общий пул 🗂")
+
+
 @router.callback_query(F.data.startswith("tk:del:"))
 async def cb_task_delete(
     callback: CallbackQuery,
@@ -324,6 +359,22 @@ async def cb_quick_plan(
             f"• {escape(task.title)}",
         )
     await callback.answer("Запланировано ✅")
+
+
+@router.callback_query(F.data.startswith("qc:pool:"))
+async def cb_quick_to_pool(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    task_id = int(callback.data.split(":")[2])
+    task = await task_service.move_to_pool(user_profile.user_id, task_id)
+    if task and callback.message:
+        await safe_edit(
+            callback.message,
+            f"🗂 Сохранено в общий пул задач:\n• <b>{escape(task.title)}</b>",
+        )
+    await callback.answer("В общем пуле 🗂")
 
 
 @router.callback_query(F.data.startswith("qc:prio:"))
@@ -379,6 +430,28 @@ async def cb_brain_dump_plan_all(
             f"📅 Все задачи (<b>{len(task_ids)}</b>) перенесены на <b>{escape(format_date_ru(target_day, today_iso))}</b>!",
         )
     await callback.answer("Запланировано ✅")
+
+
+@router.callback_query(F.data.startswith("bd:pool:"))
+async def cb_brain_dump_pool_all(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    batch_id = callback.data.split(":")[2]
+    entry = _RECENT_BATCHES.get(batch_id)
+    if not entry or entry[0] != user_profile.user_id:
+        await callback.answer("Пакет устарел, открой Инбокс.", show_alert=True)
+        return
+    _, task_ids, _ = entry
+    for tid in task_ids:
+        await task_service.move_to_pool(user_profile.user_id, tid)
+    if callback.message:
+        await safe_edit(
+            callback.message,
+            f"🗂 Все задачи (<b>{len(task_ids)}</b>) перенесены в общий пул!",
+        )
+    await callback.answer("В общем пуле 🗂")
 
 
 @router.callback_query(F.data.startswith("bd:merge:"))

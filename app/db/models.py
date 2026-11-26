@@ -13,6 +13,7 @@ class UserProfile:
     morning_digest_time: str = "08:00"
     evening_reminder_enabled: bool = True
     morning_digest_enabled: bool = True
+    class_reminder_minutes: int = 15
     study_group: str = ""
     created_at: str = ""
 
@@ -23,7 +24,7 @@ class Task:
     user_id: int
     title: str
     notes: str = ""
-    status: str = "inbox"  # inbox | planned | done | cancelled
+    status: str = "inbox"  # inbox | pool | planned | done | cancelled
     priority: int = 2  # 1 = high, 2 = medium, 3 = low
     planned_date: str | None = None  # YYYY-MM-DD
     planned_time: str | None = None  # HH:MM
@@ -31,6 +32,18 @@ class Task:
     created_at: str = ""
     completed_at: str | None = None
     carried_over_count: int = 0
+
+
+@dataclass(slots=True)
+class Reminder:
+    id: int
+    user_id: int
+    text: str
+    remind_at_utc: str  # ISO UTC YYYY-MM-DDTHH:MM:SS+00:00
+    task_id: int | None = None
+    repeat_rule: str = ""  # "" | "daily"
+    is_sent: bool = False
+    created_at: str = ""
 
 
 @dataclass(slots=True)

@@ -46,6 +46,13 @@ async def cb_toggle_reminder(
             user_profile.user_id,
             evening_reminder_enabled=not user_profile.evening_reminder_enabled,
         )
+    elif kind == "class":
+        # Cycle class reminder lead time: 15 -> 30 -> 0 (off) -> 15
+        next_lead = {15: 30, 30: 0, 0: 15}.get(user_profile.class_reminder_minutes, 15)
+        updated = await db.update_user_settings(
+            user_profile.user_id,
+            class_reminder_minutes=next_lead,
+        )
     else:
         updated = await db.update_user_settings(
             user_profile.user_id,

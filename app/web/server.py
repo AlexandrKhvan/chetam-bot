@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -15,14 +15,20 @@ from app.db.database import Database
 from app.db.models import UserProfile
 from app.services.brain_dump import split_brain_dump
 from app.services.history_service import HistoryService
+from app.services.reminder_service import (
+    ReminderService,
+    format_reminder_time_local,
+    parse_reminder_input,
+)
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 from app.services.time_utils import (
     format_date_ru,
     format_weekday_short_ru,
+    get_zoneinfo,
+    user_now,
     user_today,
     user_today_iso,
-    user_tomorrow_iso,
 )
 from app.web.auth import verify_telegram_init_data
 
@@ -32,6 +38,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 class BrainDumpRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     target_date: str | None = None
+    target_bucket: str = "inbox"  # inbox | pool
 
 
 class PlanTaskRequest(BaseModel):
@@ -53,12 +60,25 @@ class AddScheduleRequest(BaseModel):
     location: str = ""
 
 
+class CreateReminderRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class TaskRemindPresetRequest(BaseModel):
+    preset: str = "1h"  # 15m | 1h | eve | tom
+
+
+class SnoozeReminderRequest(BaseModel):
+    minutes: int = Field(default=15, ge=1, le=10080)
+
+
 def create_app(custom_settings: Settings | None = None) -> FastAPI:
     settings = custom_settings or load_settings()
     db = Database(settings.database_path)
     task_service = TaskService(db)
     schedule_service = ScheduleService(db)
     history_service = HistoryService(db)
+    reminder_service = ReminderService(db)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -105,7 +125,8 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
         today_iso = today.isoformat()
         tomorrow_iso = (today + timedelta(days=1)).isoformat()
         inbox = await task_service.list_inbox(user.user_id)
-        # Build 7-day strip starting from Monday of current week
+        pool = await task_service.list_pool(user.user_id)
+        reminders = await reminder_service.list_active(user.user_id)
         monday = today - timedelta(days=today.weekday())
         week_days = [
             {
@@ -120,6 +141,8 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
             "today": today_iso,
             "tomorrow": tomorrow_iso,
             "inbox_count": len(inbox),
+            "pool_count": len(pool),
+            "reminders_count": len(reminders),
             "week_days": week_days,
         }
 
@@ -151,6 +174,11 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
         tasks = await task_service.list_inbox(user.user_id)
         return {"tasks": [asdict(t) for t in tasks]}
 
+    @app.get("/api/pool")
+    async def api_pool(user: UserProfile = Depends(get_current_user)):
+        tasks = await task_service.list_pool(user.user_id)
+        return {"tasks": [asdict(t) for t in tasks]}
+
     @app.post("/api/tasks/dump")
     async def api_tasks_dump(
         payload: BrainDumpRequest,
@@ -158,15 +186,17 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
     ):
         today = user_today(user.timezone)
         drafts = split_brain_dump(payload.text, today=today)
+        bucket = "pool" if payload.target_bucket == "pool" else "inbox"
         created = []
         for d in drafts:
-            planned_date = d.planned_date or payload.target_date
+            planned_date = None if bucket == "pool" else (d.planned_date or payload.target_date)
             task = await task_service.create_task(
                 user.user_id,
                 d.title,
                 planned_date=planned_date,
-                planned_time=d.planned_time,
+                planned_time=None if bucket == "pool" else d.planned_time,
                 priority=d.priority,
+                initial_status=bucket,
             )
             created.append(asdict(task))
         return {"created": created, "count": len(created)}
@@ -203,12 +233,57 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": asdict(updated)}
 
+    @app.post("/api/tasks/{task_id}/pool")
+    async def api_task_to_pool(task_id: int, user: UserProfile = Depends(get_current_user)):
+        updated = await task_service.move_to_pool(user.user_id, task_id, record_carry_over=True)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return {"task": asdict(updated)}
+
     @app.post("/api/tasks/{task_id}/priority")
     async def api_cycle_priority(task_id: int, user: UserProfile = Depends(get_current_user)):
         updated = await task_service.cycle_priority(user.user_id, task_id)
         if not updated:
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": asdict(updated)}
+
+    @app.post("/api/tasks/{task_id}/remind")
+    async def api_task_remind(
+        task_id: int,
+        payload: TaskRemindPresetRequest,
+        user: UserProfile = Depends(get_current_user),
+    ):
+        task = await task_service.get_task(user.user_id, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        now_local = user_now(user.timezone)
+        if payload.preset == "15m":
+            target_local = now_local + timedelta(minutes=15)
+        elif payload.preset == "eve":
+            target_local = now_local.replace(hour=20, minute=0, second=0, microsecond=0)
+            if target_local <= now_local:
+                target_local += timedelta(days=1)
+        elif payload.preset == "tom":
+            tom = now_local.date() + timedelta(days=1)
+            target_local = datetime(
+                tom.year, tom.month, tom.day, 9, 0, tzinfo=get_zoneinfo(user.timezone)
+            )
+        else:
+            target_local = now_local + timedelta(hours=1)
+
+        rem = await reminder_service.create_reminder(
+            user.user_id,
+            task.title,
+            target_local.astimezone(timezone.utc),
+            task_id=task.id,
+        )
+        return {
+            "reminder": {
+                **asdict(rem),
+                "when_label": format_reminder_time_local(rem.remind_at_utc, user.timezone),
+            }
+        }
 
     @app.delete("/api/tasks/{task_id}")
     async def api_delete_task(task_id: int, user: UserProfile = Depends(get_current_user)):
@@ -226,6 +301,70 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
             user.user_id, payload.from_date, payload.to_date
         )
         return {"moved": moved}
+
+    @app.get("/api/reminders")
+    async def api_list_reminders(user: UserProfile = Depends(get_current_user)):
+        items = await reminder_service.list_active(user.user_id)
+        return {
+            "reminders": [
+                {
+                    **asdict(r),
+                    "when_label": format_reminder_time_local(r.remind_at_utc, user.timezone),
+                }
+                for r in items
+            ]
+        }
+
+    @app.post("/api/reminders")
+    async def api_create_reminder(
+        payload: CreateReminderRequest,
+        user: UserProfile = Depends(get_current_user),
+    ):
+        parsed = parse_reminder_input(payload.text, user.timezone)
+        if not parsed:
+            raise HTTPException(
+                status_code=400,
+                detail="Не понял время. Пример: «через 30 мин выключить плиту» или «завтра в 10:00 отчёт»",
+            )
+        rem = await reminder_service.create_reminder(
+            user.user_id,
+            parsed.text,
+            parsed.remind_at_utc,
+            repeat_rule=parsed.repeat_rule,
+        )
+        return {
+            "reminder": {
+                **asdict(rem),
+                "when_label": format_reminder_time_local(rem.remind_at_utc, user.timezone),
+            }
+        }
+
+    @app.post("/api/reminders/{reminder_id}/snooze")
+    async def api_snooze_reminder(
+        reminder_id: int,
+        payload: SnoozeReminderRequest,
+        user: UserProfile = Depends(get_current_user),
+    ):
+        updated = await reminder_service.snooze(
+            user.user_id, reminder_id, minutes=payload.minutes
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        return {
+            "reminder": {
+                **asdict(updated),
+                "when_label": format_reminder_time_local(updated.remind_at_utc, user.timezone),
+            }
+        }
+
+    @app.delete("/api/reminders/{reminder_id}")
+    async def api_delete_reminder(
+        reminder_id: int, user: UserProfile = Depends(get_current_user)
+    ):
+        ok = await reminder_service.delete_reminder(user.user_id, reminder_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        return {"deleted": True}
 
     @app.post("/api/schedule/{event_id}/toggle")
     async def api_toggle_schedule(event_id: int, user: UserProfile = Depends(get_current_user)):

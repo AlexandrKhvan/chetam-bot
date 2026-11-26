@@ -19,11 +19,12 @@ class TaskService:
         planned_date: str | None = None,
         planned_time: str | None = None,
         priority: int = 2,
+        initial_status: str = "inbox",
     ) -> Task:
         clean_title = title.strip()
         if not clean_title:
             raise ValueError("Task title cannot be empty")
-        status = "planned" if planned_date else "inbox"
+        status = "planned" if planned_date else ("pool" if initial_status == "pool" else "inbox")
         now = utc_now_iso()
         async with self.db.connect() as conn:
             cursor = await conn.execute(
@@ -81,6 +82,55 @@ class TaskService:
             )
             rows = await cursor.fetchall()
             return [self._row_to_task(r) for r in rows]
+
+    async def list_pool(self, user_id: int) -> list[Task]:
+        async with self.db.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE user_id = ? AND status = 'pool'
+                ORDER BY priority ASC, id DESC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_task(r) for r in rows]
+
+    async def move_to_pool(
+        self, user_id: int, task_id: int, *, record_carry_over: bool = False
+    ) -> Task | None:
+        now = utc_now_iso()
+        async with self.db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            if record_carry_over and row["planned_date"]:
+                await conn.execute(
+                    """
+                    INSERT INTO task_history_events (user_id, task_id, event_date, action, task_title, created_at)
+                    VALUES (?, ?, ?, 'carried_over', ?, ?)
+                    """,
+                    (user_id, task_id, row["planned_date"], row["title"], now),
+                )
+            await conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'pool',
+                    planned_date = NULL,
+                    planned_time = NULL,
+                    completed_at = NULL
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+            await conn.commit()
+            updated_cur = await conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            updated = await updated_cur.fetchone()
+            return self._row_to_task(updated) if updated else None
 
     async def list_tasks_for_date(self, user_id: int, day_iso: str) -> list[Task]:
         async with self.db.connect() as conn:

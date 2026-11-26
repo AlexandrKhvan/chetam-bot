@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     morning_digest_time TEXT NOT NULL DEFAULT '08:00',
     evening_reminder_enabled INTEGER NOT NULL DEFAULT 1,
     morning_digest_enabled INTEGER NOT NULL DEFAULT 1,
+    class_reminder_minutes INTEGER NOT NULL DEFAULT 15,
     study_group TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
@@ -76,6 +77,24 @@ CREATE TABLE IF NOT EXISTS task_history_events (
 
 CREATE INDEX IF NOT EXISTS idx_history_user_date
     ON task_history_events (user_id, event_date);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    task_id INTEGER,
+    text TEXT NOT NULL,
+    remind_at_utc TEXT NOT NULL,
+    repeat_rule TEXT NOT NULL DEFAULT '',
+    is_sent INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_due
+    ON reminders (is_sent, remind_at_utc);
+CREATE INDEX IF NOT EXISTS idx_reminders_user
+    ON reminders (user_id, is_sent, remind_at_utc);
 """
 
 
@@ -98,6 +117,10 @@ class Database:
             if "study_group" not in cols:
                 await conn.execute(
                     "ALTER TABLE users ADD COLUMN study_group TEXT NOT NULL DEFAULT ''"
+                )
+            if "class_reminder_minutes" not in cols:
+                await conn.execute(
+                    "ALTER TABLE users ADD COLUMN class_reminder_minutes INTEGER NOT NULL DEFAULT 15"
                 )
             await conn.commit()
 
@@ -170,6 +193,7 @@ class Database:
         morning_digest_time: str | None = None,
         evening_reminder_enabled: bool | None = None,
         morning_digest_enabled: bool | None = None,
+        class_reminder_minutes: int | None = None,
         study_group: str | None = None,
     ) -> UserProfile | None:
         updates: list[str] = []
@@ -189,6 +213,9 @@ class Database:
         if morning_digest_enabled is not None:
             updates.append("morning_digest_enabled = ?")
             params.append(int(morning_digest_enabled))
+        if class_reminder_minutes is not None:
+            updates.append("class_reminder_minutes = ?")
+            params.append(max(0, class_reminder_minutes))
         if study_group is not None:
             updates.append("study_group = ?")
             params.append(study_group.strip())
@@ -218,6 +245,11 @@ class Database:
             morning_digest_time=row["morning_digest_time"],
             evening_reminder_enabled=bool(row["evening_reminder_enabled"]),
             morning_digest_enabled=bool(row["morning_digest_enabled"]),
+            class_reminder_minutes=(
+                int(row["class_reminder_minutes"])
+                if "class_reminder_minutes" in row.keys()
+                else 15
+            ),
             study_group=row["study_group"] if "study_group" in row.keys() else "",
             created_at=row["created_at"],
         )
