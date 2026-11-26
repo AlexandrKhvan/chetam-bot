@@ -75,6 +75,18 @@ ROOM_RE = re.compile(
 )
 LEADING_ROOM_RE = re.compile(r"^(\d{3}[А-Яа-яA-Za-z]?)\s+(.*)$")
 ZOOM_RE = re.compile(r"\bzoom\b", re.IGNORECASE)
+ZOOM_HEADER_ID_RE = re.compile(
+    r"zoom[^\n]{0,30}?(?:идентификатор|id)\s*[:.]?\s*([\d\s]{8,16})",
+    re.IGNORECASE,
+)
+ZOOM_PASSCODE_RE = re.compile(
+    r"(?:код\s*доступа|пароль|passcode|password)\s*[:.]?\s*([A-Za-z0-9_\-]{3,20})",
+    re.IGNORECASE,
+)
+MEETING_URL_RE = re.compile(
+    r"https?://(?:[\w.-]*(?:zoom\.us|meet\.google\.com|teams\.microsoft\.com|telemost\.yandex\.ru)/\S+)",
+    re.IGNORECASE,
+)
 GROUP_TAG_RE = re.compile(r"(?:^|[\s.,;(])([А-ЯЁA-Z]{2,5}-\d{2,3}[А-Яа-я]?)\b")
 ROMAN_PAIR_RE = re.compile(r"^[IVX]{1,4}$")
 MODE_CELL_RE = re.compile(r"^(?:ОО|ДОО|ДО)(?:[\s/\n]+(?:ОО|ДОО|ДО))*$", re.IGNORECASE)
@@ -96,6 +108,37 @@ def _resolve_week_monday(reference_date: date) -> date:
     if reference_date.weekday() == 6:
         return reference_date + timedelta(days=1)
     return reference_date - timedelta(days=reference_date.weekday())
+
+
+def detect_meeting_info_in_text(text: str) -> str:
+    """Extracts Zoom ID/passcode or online meeting URL from header or cell text."""
+    m_url = MEETING_URL_RE.search(text)
+    if m_url:
+        return m_url.group(0).rstrip(".,;)")
+
+    m_id = ZOOM_HEADER_ID_RE.search(text)
+    if m_id:
+        zoom_id = _normalize_whitespace(m_id.group(1))
+        codes = [c.strip() for c in ZOOM_PASSCODE_RE.findall(text) if c.strip()]
+        if codes:
+            unique_codes = list(dict.fromkeys(codes))
+            return f"Zoom ID: {zoom_id} · код: {' / '.join(unique_codes)}"
+        return f"Zoom ID: {zoom_id}"
+    return ""
+
+
+def detect_meeting_info_in_doc(doc: Document) -> str:
+    texts: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables[:2]:
+        for row in table.rows[:10]:
+            for cell in _dedupe_row_cells(row):
+                if cell:
+                    texts.append(cell)
+    for text in texts:
+        info = detect_meeting_info_in_text(text)
+        if info:
+            return info
+    return ""
 
 
 def detect_date_range_in_doc(doc: Document) -> tuple[date, date] | None:
@@ -583,6 +626,7 @@ def parse_docx_schedule(
 
     date_range = detect_date_range_in_doc(doc)
     effective_ref = date_range[0] if date_range else ref
+    doc_meeting_info = detect_meeting_info_in_doc(doc)
 
     items: list[ParsedScheduleItem] = []
     for table in doc.tables:
@@ -598,6 +642,15 @@ def parse_docx_schedule(
 
     if not items:
         items.extend(_parse_paragraphs(doc, effective_ref))
+
+    if doc_meeting_info:
+        for item in items:
+            if not item.meeting_info and (
+                "zoom" in item.location.lower()
+                or "zoom" in item.title.lower()
+                or "онлайн" in item.location.lower()
+            ):
+                item.meeting_info = doc_meeting_info
 
     seen: set[tuple[str, str, str, str]] = set()
     unique: list[ParsedScheduleItem] = []

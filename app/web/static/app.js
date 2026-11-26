@@ -12,9 +12,11 @@
     weekDays: [],
     activeTab: "day",
     activeBucket: "inbox", // inbox | pool
+    activePoolTag: "",
     eveningSource: "inbox", // inbox | pool
     historyDays: 7,
     selectedHistoryDay: "",
+    expandedTasks: new Set(),
   };
 
   function haptic(kind = "light") {
@@ -31,18 +33,22 @@
     elNode.textContent = msg;
     elNode.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => elNode.classList.remove("show"), 2300);
+    toastTimer = setTimeout(() => elNode.classList.remove("show"), 2400);
   }
 
   async function api(path, options = {}) {
     const headers = Object.assign(
       {
-        "Content-Type": "application/json",
         "X-Telegram-Init-Data": tg ? tg.initData || "" : "",
       },
+      options.isForm ? {} : { "Content-Type": "application/json" },
       options.headers || {}
     );
-    const resp = await fetch(path, Object.assign({}, options, { headers }));
+    const resp = await fetch(path, {
+      method: options.method || "GET",
+      body: options.body,
+      headers,
+    });
     if (!resp.ok) {
       let detail = `HTTP ${resp.status}`;
       try {
@@ -118,11 +124,59 @@
     const timeStr = ev.end_time ? `${ev.start_time}–${ev.end_time}` : ev.start_time;
     meta.appendChild(el("span", "chip time", timeStr));
     if (ev.location) meta.appendChild(el("span", "chip", ev.location));
+    if (ev.meeting_info) meta.appendChild(el("span", "chip zoom", `🔗 ${ev.meeting_info}`));
     body.appendChild(meta);
 
     row.appendChild(check);
     row.appendChild(body);
     return row;
+  }
+
+  function buildSubtaskPanel(task, onRefresh) {
+    const box = el("div", "subtask-box");
+    (task.subtasks || []).forEach((st) => {
+      const sRow = el("div", `subtask-row${st.is_done ? " done" : ""}`);
+      const btn = el("button", "subtask-check", st.is_done ? "✓" : "");
+      btn.type = "button";
+      btn.addEventListener("click", async () => {
+        haptic("light");
+        await api(`/api/subtasks/${st.id}/toggle`, { method: "POST" });
+        await onRefresh();
+      });
+      const lbl = el("span", "", st.title);
+      lbl.style.flex = "1";
+      const del = el("button", "mini-btn danger", "✕");
+      del.type = "button";
+      del.style.padding = "2px 6px";
+      del.addEventListener("click", async () => {
+        await api(`/api/subtasks/${st.id}`, { method: "DELETE" });
+        await onRefresh();
+      });
+      sRow.append(btn, lbl, del);
+      box.appendChild(sRow);
+    });
+
+    const form = el("form", "subtask-add-form");
+    const inp = el("input", "subtask-input");
+    inp.type = "text";
+    inp.placeholder = "Добавить подзадачу…";
+    const addBtn = el("button", "mini-btn", "＋");
+    addBtn.type = "submit";
+    form.append(inp, addBtn);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const val = inp.value.trim();
+      if (!val) return;
+      haptic("light");
+      await api(`/api/tasks/${task.id}/subtasks`, {
+        method: "POST",
+        body: JSON.stringify({ title: val }),
+      });
+      inp.value = "";
+      await onRefresh();
+    });
+    box.appendChild(form);
+    return box;
   }
 
   function buildTaskRow(task, options) {
@@ -143,8 +197,37 @@
     if (task.planned_time) meta.appendChild(el("span", "chip time", task.planned_time));
     if (task.priority === 1) meta.appendChild(el("span", "chip prio-1", "🔴 Важно"));
     else if (task.priority === 3) meta.appendChild(el("span", "chip", "⚪ Низкий"));
+    if (task.recurrence_rule) meta.appendChild(el("span", "chip", "🔁 повтор"));
+    if (task.deadline_badge && task.status !== "done") {
+      const urgentDl = task.deadline_days_left !== null && task.deadline_days_left <= 3;
+      meta.appendChild(el("span", `chip${urgentDl ? " deadline-urgent" : ""}`, task.deadline_badge));
+    }
+    (task.tags || []).forEach((tgName) => {
+      meta.appendChild(el("span", "chip tag", `#${tgName}`));
+    });
     if (task.carried_over_count > 0) meta.appendChild(el("span", "chip", `↻${task.carried_over_count}`));
+
+    if (options.mode !== "evening-pick") {
+      const subs = task.subtasks || [];
+      const doneSubs = subs.filter((s) => s.is_done).length;
+      const subToggle = el("button", "chip", subs.length ? `☑️ ${doneSubs}/${subs.length}` : "＋шаг");
+      subToggle.type = "button";
+      subToggle.style.border = "none";
+      subToggle.style.cursor = "pointer";
+      subToggle.addEventListener("click", () => {
+        haptic("light");
+        if (state.expandedTasks.has(task.id)) state.expandedTasks.delete(task.id);
+        else state.expandedTasks.add(task.id);
+        options.onRefresh();
+      });
+      meta.appendChild(subToggle);
+    }
+
     if (meta.childNodes.length > 0) body.appendChild(meta);
+
+    if (state.expandedTasks.has(task.id) && options.mode !== "evening-pick") {
+      body.appendChild(buildSubtaskPanel(task, options.onRefresh));
+    }
 
     const actions = el("div", "item-actions");
     const makeRemindBtn = () => {
@@ -164,14 +247,6 @@
     };
 
     if (options.mode === "day") {
-      const prioBtn = el("button", "mini-btn", task.priority === 1 ? "🔴" : task.priority === 3 ? "⚪" : "🟡");
-      prioBtn.type = "button";
-      prioBtn.addEventListener("click", async () => {
-        haptic("light");
-        await api(`/api/tasks/${task.id}/priority`, { method: "POST" });
-        await options.onRefresh();
-      });
-
       const moveBtn = el("button", "mini-btn", "➡️");
       moveBtn.type = "button";
       moveBtn.title = "На завтра";
@@ -182,7 +257,17 @@
           method: "POST",
           body: JSON.stringify({ target_date: nextIso, carry_over: true }),
         });
-        showToast("Перенесено на следующий день");
+        showToast("Перенесено на следующий день ➡️");
+        await options.onRefresh();
+      });
+
+      const poolBtn = el("button", "mini-btn", "🗂");
+      poolBtn.type = "button";
+      poolBtn.title = "Убрать в общий пул";
+      poolBtn.addEventListener("click", async () => {
+        haptic("light");
+        await api(`/api/tasks/${task.id}/pool`, { method: "POST" });
+        showToast("Убрано в общий пул 🗂");
         await options.onRefresh();
       });
 
@@ -194,7 +279,7 @@
         await options.onRefresh();
       });
 
-      actions.append(makeRemindBtn(), prioBtn, moveBtn, delBtn);
+      actions.append(makeRemindBtn(), moveBtn, poolBtn, delBtn);
     } else if (options.mode === "inbox" || options.mode === "pool") {
       const todayBtn = el("button", "mini-btn", "📅");
       todayBtn.type = "button";
@@ -264,7 +349,7 @@
       poolBtn.addEventListener("click", async () => {
         haptic("light");
         await api(`/api/tasks/${task.id}/pool`, { method: "POST" });
-        showToast("Убрано в общий пул");
+        showToast("Убрано в общий пул 🗂");
         await options.onRefresh();
       });
       actions.append(moveBtn, poolBtn);
@@ -304,16 +389,34 @@
     document.getElementById("day-progress-fill").style.width = `${data.completion_rate}%`;
     document.getElementById("day-progress-sub").textContent = `${data.done_items} из ${data.total_items} выполнено`;
 
-    const schBlock = document.getElementById("day-schedule-block");
+    // Deadlines banner
+    const dlCard = document.getElementById("day-deadlines-card");
+    const dlList = document.getElementById("day-deadlines-list");
+    dlList.replaceChildren();
+    const urgentDls = (data.deadlines || []).filter((d) => d.deadline_days_left !== null && d.deadline_days_left <= 7);
+    if (urgentDls.length > 0 && dayIso === state.today) {
+      dlCard.classList.remove("hidden");
+      urgentDls.slice(0, 4).forEach((d) => {
+        const line = el("div", "deadline-item");
+        line.appendChild(el("span", "", d.title));
+        const urgent = d.deadline_days_left <= 3;
+        line.appendChild(el("span", `chip${urgent ? " deadline-urgent" : ""}`, d.deadline_badge));
+        dlList.appendChild(line);
+      });
+    } else {
+      dlCard.classList.add("hidden");
+    }
+
     const schList = document.getElementById("day-schedule-list");
     schList.replaceChildren();
     if (data.schedule_events.length > 0) {
-      schBlock.classList.remove("hidden");
       data.schedule_events.forEach((ev) => {
         schList.appendChild(buildScheduleRow(ev, () => loadDay(dayIso)));
       });
     } else {
-      schBlock.classList.add("hidden");
+      schList.appendChild(
+        el("div", "empty-state", "Пар на этот день нет — нажми «📤 Импорт» (.docx, .ics, .xlsx, .pdf, фото).")
+      );
     }
 
     const taskList = document.getElementById("day-task-list");
@@ -328,7 +431,8 @@
   }
 
   async function loadBucket() {
-    const [inboxData, poolData] = await Promise.all([api("/api/inbox"), api("/api/pool")]);
+    const tagParam = state.activeBucket === "pool" && state.activePoolTag ? `?tag=${encodeURIComponent(state.activePoolTag)}` : "";
+    const [inboxData, poolData] = await Promise.all([api("/api/inbox"), api(`/api/pool${tagParam}`)]);
     setBadge("nav-inbox-badge", inboxData.tasks.length);
     document.getElementById("bucket-inbox-btn").textContent = `📥 Инбокс (${inboxData.tasks.length})`;
     document.getElementById("bucket-pool-btn").textContent = `🗂 Пул задач (${poolData.tasks.length})`;
@@ -336,9 +440,36 @@
     const isPool = state.activeBucket === "pool";
     document.getElementById("dump-title").textContent = isPool ? "🗂 Добавить в общий пул" : "🧠 Скинь всё в кучу";
     document.getElementById("dump-hint").textContent = isPool
-      ? "Дела «на потом / когда будет время» — их удобно забирать в план на вечернем планировании."
-      : "Пиши сплошным текстом — CheTam сам разобьёт на задачи, вытащит время, даты и срочность.";
+      ? "Можно указывать #теги и дедлайны (например: «лаба #учёба до 05.12») — за 3 дня срочность поднимется сама."
+      : "Пиши сплошным текстом — CheTam разобьёт на задачи, вытащит время, дедлайны, #теги и повторы.";
     document.getElementById("dump-submit-btn").textContent = isPool ? "Сохранить в Пул" : "Разобрать в Инбокс";
+
+    const tagsBar = document.getElementById("pool-tags-bar");
+    tagsBar.replaceChildren();
+    if (isPool && poolData.tags && poolData.tags.length > 0) {
+      tagsBar.classList.remove("hidden");
+      const allBtn = el("button", `tag-chip${!state.activePoolTag ? " active" : ""}`, "Все");
+      allBtn.type = "button";
+      allBtn.addEventListener("click", () => {
+        haptic("light");
+        state.activePoolTag = "";
+        loadBucket();
+      });
+      tagsBar.appendChild(allBtn);
+
+      poolData.tags.forEach((tgName) => {
+        const b = el("button", `tag-chip${state.activePoolTag === tgName ? " active" : ""}`, `#${tgName}`);
+        b.type = "button";
+        b.addEventListener("click", () => {
+          haptic("light");
+          state.activePoolTag = tgName;
+          loadBucket();
+        });
+        tagsBar.appendChild(b);
+      });
+    } else {
+      tagsBar.classList.add("hidden");
+    }
 
     const tasks = isPool ? poolData.tasks : inboxData.tasks;
     document.getElementById("inbox-heading").textContent = isPool
@@ -349,7 +480,7 @@
     list.replaceChildren();
     if (tasks.length === 0) {
       list.appendChild(
-        el("div", "empty-state", isPool ? "Общий пул пуст — сюда можно парковать дела «на потом»." : "Инбокс пуст — голова свободна ✨")
+        el("div", "empty-state", isPool ? "В пуле пока пусто — сюда можно парковать дела «на потом»." : "Инбокс пуст — голова свободна ✨")
       );
       return;
     }
@@ -383,6 +514,21 @@
     }
 
     document.getElementById("evening-tomorrow-heading").textContent = `🌅 ${tomData.label}`;
+
+    const winBox = document.getElementById("evening-free-windows");
+    winBox.replaceChildren();
+    if (tomData.free_windows && tomData.free_windows.length > 0 && tomData.schedule_events.length > 0) {
+      winBox.classList.remove("hidden");
+      tomData.free_windows.slice(0, 4).forEach((w) => {
+        const h = Math.floor(w.duration_minutes / 60);
+        const m = w.duration_minutes % 60;
+        const dur = h && m ? `${h}ч ${m}м` : h ? `${h}ч` : `${m}м`;
+        winBox.appendChild(el("span", "chip time", `🕒 ${w.start_time}–${w.end_time} (${dur})`));
+      });
+    } else {
+      winBox.classList.add("hidden");
+    }
+
     const tomSch = document.getElementById("evening-tomorrow-schedule");
     tomSch.replaceChildren();
     tomData.schedule_events.forEach((ev) => {
@@ -407,7 +553,7 @@
     const srcTasks = state.eveningSource === "pool" ? poolData.tasks : inboxData.tasks;
     if (srcTasks.length === 0) {
       picker.appendChild(
-        el("div", "empty-state", state.eveningSource === "pool" ? "В пуле задач пока пусто." : "Инбокс пуст — посмотри во вкладке «Взять из Пула»!")
+        el("div", "empty-state", state.eveningSource === "pool" ? "В пуле задач пока пусто." : "Инбокс пуст — загляни в «Взять из Пула»!")
       );
     } else {
       srcTasks.forEach((t) => {
@@ -555,6 +701,23 @@
     document.getElementById("refresh-btn").addEventListener("click", () => {
       haptic("light");
       refreshAll().then(() => showToast("Обновлено")).catch((e) => showToast(e.message));
+    });
+
+    document.getElementById("schedule-file-input").addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      showToast("⏳ Импортирую расписание…");
+      try {
+        const res = await api("/api/schedule/upload", { method: "POST", body: fd, isForm: true });
+        showToast(`🎓 Импортировано занятий: ${res.saved}`);
+        await loadDay(state.selectedDay);
+      } catch (err) {
+        showToast(err.message);
+      } finally {
+        e.target.value = "";
+      }
     });
 
     document.getElementById("day-quick-add").addEventListener("submit", async (e) => {

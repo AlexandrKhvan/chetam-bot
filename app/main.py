@@ -15,26 +15,28 @@ from app.bot.middlewares import UserContextMiddleware
 from app.bot.scheduler import ReminderScheduler
 from app.config import load_settings
 from app.db.database import Database
+from app.services.backup_service import BackupService
 from app.services.history_service import HistoryService
 from app.services.parsers.vision_parser import VisionScheduleParser
 from app.services.reminder_service import ReminderService
+from app.services.review_service import WeeklyReviewService
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 
 # Strictly <= 512 chars (Telegram Bot API limit)
 BOT_DESCRIPTION = (
-    "CheTam («Чё там на завтра?») — личный планировщик дня, инбокс, пул задач и учебный трекер.\n\n"
-    "🧠 Пиши всё в кучу — сам разобью на задачи с датами и срочностью\n"
+    "CheTam («Чё там на завтра?») — умный планировщик дня, пул задач и учебный трекер.\n\n"
+    "🧠 Текст в кучу, голос 🎙 и forward → задачи с #тегами и повторами\n"
+    "⏳ Дедлайны с авто-срочностью 🔴 за 3 дня\n"
     "📥 Инбокс + 🗂 Общий пул задач «на потом»\n"
-    "🎓 Импорт расписания из .docx и фото с фильтром группы\n"
-    "🌙 Вечерний ритуал сборки завтрашнего дня\n"
-    "🔔 Напоминания, Snooze и уведомления за 15 мин до пар\n"
-    "📊 История по дням, стрик 🔥 и встроенный Mini App"
+    "🎓 Расписание из .docx/.ics/.xlsx/.pdf/фото + Zoom-коды\n"
+    "🌙 Вечерний ритуал, свободные окна и воскресное AI-ревью\n"
+    "🔔 Напоминания, Snooze и уведомления до пар · 📱 Mini App"
 )
 
 # Strictly <= 120 chars (Telegram Bot API limit)
 BOT_SHORT_DESCRIPTION = (
-    "Планировщик дня, пул задач, разбор «кучи мыслей», расписание из .docx, напоминания и Mini App."
+    "Планировщик дня, пул задач, дедлайны, разбор мыслей, расписание (.docx/.ics/.xlsx), напоминания и Mini App."
 )
 
 
@@ -42,6 +44,7 @@ async def _configure_bot_profile(bot: Bot, webapp_url: str) -> None:
     commands = [
         BotCommand(command="today", description="📅 План на сегодня"),
         BotCommand(command="tomorrow", description="🌅 План на завтра"),
+        BotCommand(command="deadlines", description="⏳ Ближайшие дедлайны"),
         BotCommand(command="inbox", description="📥 Входящие мысли"),
         BotCommand(command="pool", description="🗂 Общий пул задач"),
         BotCommand(command="plan", description="🌙 Вечернее планирование"),
@@ -49,6 +52,7 @@ async def _configure_bot_profile(bot: Bot, webapp_url: str) -> None:
         BotCommand(command="reminders", description="⏰ Активные напоминания"),
         BotCommand(command="schedule", description="🎓 Расписание учёбы"),
         BotCommand(command="history", description="📊 История и статистика"),
+        BotCommand(command="review", description="🧭 Воскресное AI-ревью"),
         BotCommand(command="settings", description="⚙️ Настройки и уведомления"),
         BotCommand(command="help", description="✨ Все возможности бота"),
     ]
@@ -87,6 +91,8 @@ async def run_bot() -> None:
     history_service = HistoryService(db)
     reminder_service = ReminderService(db)
     vision_parser = VisionScheduleParser(settings)
+    review_service = WeeklyReviewService(db, task_service, history_service, vision_parser)
+    backup_service = BackupService(settings)
 
     bot = Bot(
         token=settings.bot_token,
@@ -101,6 +107,8 @@ async def run_bot() -> None:
     dp["history_service"] = history_service
     dp["reminder_service"] = reminder_service
     dp["vision_parser"] = vision_parser
+    dp["review_service"] = review_service
+    dp["backup_service"] = backup_service
 
     middleware = UserContextMiddleware(db=db, settings=settings)
     dp.message.middleware(middleware)
@@ -114,6 +122,8 @@ async def run_bot() -> None:
         task_service=task_service,
         schedule_service=schedule_service,
         reminder_service=reminder_service,
+        review_service=review_service,
+        backup_service=backup_service,
     )
 
     await _configure_bot_profile(bot, settings.webapp_url)

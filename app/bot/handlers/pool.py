@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from html import escape
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -20,14 +18,29 @@ router = Router(name="pool")
 
 
 async def _render_pool_view(
-    task_service: TaskService, user: UserProfile, page: int = 0
+    task_service: TaskService, user: UserProfile, *, active_tag: str = "", page: int = 0
 ):
-    tasks = await task_service.list_pool(user.user_id)
     today_iso = user_today_iso(user.timezone)
     tomorrow_iso = user_tomorrow_iso(user.timezone)
+    all_tags = await task_service.list_pool_tags(user.user_id)
+    if active_tag and active_tag not in all_tags:
+        active_tag = ""
+    tasks = await task_service.list_pool(
+        user.user_id, tag=active_tag or None, today_iso=today_iso
+    )
     max_page = max(0, (len(tasks) - 1) // 6)
     page = max(0, min(page, max_page))
-    return render_pool(tasks, page=page), pool_kb(tasks, today_iso, tomorrow_iso, page=page)
+    return (
+        render_pool(tasks, today_iso, active_tag=active_tag, page=page),
+        pool_kb(
+            tasks,
+            today_iso,
+            tomorrow_iso,
+            tags=all_tags,
+            active_tag=active_tag,
+            page=page,
+        ),
+    )
 
 
 @router.message(Command("pool"))
@@ -43,14 +56,34 @@ async def cmd_pool(
     await message.answer(text, reply_markup=kb)
 
 
+@router.callback_query(F.data.startswith("pl:tag:"))
+async def cb_pool_tag_filter(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    chosen = callback.data.split(":", 2)[2]
+    active_tag = "" if chosen == "ALL" else chosen
+    text, kb = await _render_pool_view(
+        task_service, user_profile, active_tag=active_tag, page=0
+    )
+    if callback.message:
+        await safe_edit(callback.message, text, kb)
+    await callback.answer(f"Фильтр: #{active_tag}" if active_tag else "Все задачи пула")
+
+
 @router.callback_query(F.data.startswith("pl:pg:"))
 async def cb_pool_page(
     callback: CallbackQuery,
     task_service: TaskService,
     user_profile: UserProfile,
 ) -> None:
-    page = int(callback.data.split(":")[2])
-    text, kb = await _render_pool_view(task_service, user_profile, page=page)
+    parts = callback.data.split(":")
+    page = int(parts[2])
+    active_tag = "" if len(parts) < 4 or parts[3] == "ALL" else parts[3]
+    text, kb = await _render_pool_view(
+        task_service, user_profile, active_tag=active_tag, page=page
+    )
     if callback.message:
         await safe_edit(callback.message, text, kb)
     await callback.answer()
@@ -62,7 +95,7 @@ async def cb_pool_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message:
         await callback.message.answer(
             "🗂 <b>Добавить в общий пул задач</b>\n\n"
-            "Напиши одну задачу или сразу несколько (списком или в кучу) — сохраню их в пул «на потом».\n"
+            "Напиши одну задачу или сразу несколько (можно с <code>#тегами</code> и дедлайнами вроде <code>до 05.12</code>).\n"
             "<i>/cancel — отмена</i>"
         )
     await callback.answer()
@@ -85,8 +118,11 @@ async def handle_pool_add_input(
         await task_service.create_task(
             user_profile.user_id,
             d.title,
+            deadline_date=d.deadline_date,
+            tags=d.tags,
             priority=d.priority,
             initial_status="pool",
+            today_iso=today.isoformat(),
         )
         created += 1
     await state.clear()
@@ -100,9 +136,13 @@ async def cb_pool_plan(
     task_service: TaskService,
     user_profile: UserProfile,
 ) -> None:
-    _, _, task_id_s, target_day, page_s = callback.data.split(":")
+    parts = callback.data.split(":")
+    task_id_s, target_day, page_s = parts[2], parts[3], parts[4]
+    active_tag = "" if len(parts) < 6 or parts[5] == "ALL" else parts[5]
     await task_service.plan_task_for_date(user_profile.user_id, int(task_id_s), target_day)
-    text, kb = await _render_pool_view(task_service, user_profile, page=int(page_s))
+    text, kb = await _render_pool_view(
+        task_service, user_profile, active_tag=active_tag, page=int(page_s)
+    )
     if callback.message:
         await safe_edit(callback.message, text, kb)
     await callback.answer("Забрано из пула в план ✅")
@@ -114,9 +154,13 @@ async def cb_pool_priority(
     task_service: TaskService,
     user_profile: UserProfile,
 ) -> None:
-    _, _, task_id_s, page_s = callback.data.split(":")
+    parts = callback.data.split(":")
+    task_id_s, page_s = parts[2], parts[3]
+    active_tag = "" if len(parts) < 5 or parts[4] == "ALL" else parts[4]
     await task_service.cycle_priority(user_profile.user_id, int(task_id_s))
-    text, kb = await _render_pool_view(task_service, user_profile, page=int(page_s))
+    text, kb = await _render_pool_view(
+        task_service, user_profile, active_tag=active_tag, page=int(page_s)
+    )
     if callback.message:
         await safe_edit(callback.message, text, kb)
     await callback.answer("Приоритет изменён")
@@ -128,9 +172,13 @@ async def cb_pool_delete(
     task_service: TaskService,
     user_profile: UserProfile,
 ) -> None:
-    _, _, task_id_s, page_s = callback.data.split(":")
+    parts = callback.data.split(":")
+    task_id_s, page_s = parts[2], parts[3]
+    active_tag = "" if len(parts) < 5 or parts[4] == "ALL" else parts[4]
     await task_service.delete_task(user_profile.user_id, int(task_id_s))
-    text, kb = await _render_pool_view(task_service, user_profile, page=int(page_s))
+    text, kb = await _render_pool_view(
+        task_service, user_profile, active_tag=active_tag, page=int(page_s)
+    )
     if callback.message:
         await safe_edit(callback.message, text, kb)
     await callback.answer("Удалено 🗑")

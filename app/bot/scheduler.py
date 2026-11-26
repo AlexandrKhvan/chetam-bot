@@ -11,7 +11,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.bot.formatters import render_day_plan, render_evening_step1
 from app.bot.keyboards import day_plan_kb, evening_step1_kb, reminder_fired_kb
 from app.db.database import Database
+from app.services.backup_service import BackupService
 from app.services.reminder_service import ReminderService
+from app.services.review_service import WeeklyReviewService
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 from app.services.time_utils import user_now
@@ -27,12 +29,16 @@ class ReminderScheduler:
         task_service: TaskService,
         schedule_service: ScheduleService,
         reminder_service: ReminderService,
+        review_service: WeeklyReviewService | None = None,
+        backup_service: BackupService | None = None,
     ) -> None:
         self.bot = bot
         self.db = db
         self.task_service = task_service
         self.schedule_service = schedule_service
         self.reminder_service = reminder_service
+        self.review_service = review_service
+        self.backup_service = backup_service
         self.scheduler = AsyncIOScheduler()
         self._sent_keys: set[tuple[int, str, str]] = set()
 
@@ -44,15 +50,33 @@ class ReminderScheduler:
             id="reminder_tick",
             replace_existing=True,
         )
+        if self.backup_service is not None:
+            self.scheduler.add_job(
+                self._daily_backup,
+                trigger="cron",
+                hour=3,
+                minute=0,
+                timezone="UTC",
+                id="daily_backup",
+                replace_existing=True,
+            )
         self.scheduler.start()
-        logger.info("Reminder scheduler started (30s interval)")
+        logger.info("Reminder scheduler started (30s interval + daily 03:00 UTC backup)")
 
     def stop(self) -> None:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
+    async def _daily_backup(self) -> None:
+        if not self.backup_service:
+            return
+        try:
+            res = await self.backup_service.run_backup()
+            logger.info("Scheduled backup finished: %s (%s)", res.local_path, res.s3_uri or "local only")
+        except Exception:
+            logger.exception("Scheduled SQLite backup failed")
+
     async def _tick(self) -> None:
-        # 1. Persistent custom & task-linked reminders (indexed SQL query)
         due_reminders = await self.reminder_service.list_due(datetime.now(timezone.utc))
         for rem in due_reminders:
             try:
@@ -67,7 +91,6 @@ class ReminderScheduler:
             except Exception:
                 logger.exception("Failed to send reminder %s to user %s", rem.id, rem.user_id)
 
-        # 2. Per-user daily digests, timed tasks, and upcoming classes
         users = await self.db.list_users()
         for user in users:
             now_local = user_now(user.timezone)
@@ -89,7 +112,14 @@ class ReminderScheduler:
                     await self._send_morning_digest(user.user_id, today_iso)
                     await asyncio.sleep(0.05)
 
-            # 2a. Auto-notify for today's tasks that have an explicit planned_time
+            # Sunday 20:00 weekly AI review
+            if self.review_service and now_local.weekday() == 6 and hhmm == "20:00":
+                r_key = (user.user_id, "sunday_review", today_iso)
+                if r_key not in self._sent_keys:
+                    self._sent_keys.add(r_key)
+                    await self._send_sunday_review(user.user_id, today_iso)
+                    await asyncio.sleep(0.05)
+
             tasks_today = await self.task_service.list_pending_tasks_for_date(
                 user.user_id, today_iso
             )
@@ -101,7 +131,6 @@ class ReminderScheduler:
                         await self._send_timed_task_alert(user.user_id, task.id, task.title, hhmm)
                         await asyncio.sleep(0.05)
 
-            # 2b. Auto-notify before upcoming study classes
             lead = user.class_reminder_minutes
             if lead > 0:
                 target_start = (now_local + timedelta(minutes=lead)).strftime("%H:%M")
@@ -114,7 +143,12 @@ class ReminderScheduler:
                         if e_key not in self._sent_keys:
                             self._sent_keys.add(e_key)
                             await self._send_class_alert(
-                                user.user_id, ev.title, ev.start_time, ev.location, lead
+                                user.user_id,
+                                ev.title,
+                                ev.start_time,
+                                ev.location,
+                                ev.meeting_info,
+                                lead,
                             )
                             await asyncio.sleep(0.05)
 
@@ -125,7 +159,7 @@ class ReminderScheduler:
         self, user_id: int, today_iso: str, tomorrow_iso: str
     ) -> None:
         try:
-            plan = await self.task_service.get_day_plan(user_id, today_iso)
+            plan = await self.task_service.get_day_plan(user_id, today_iso, today_iso=today_iso)
             pending = [t for t in plan.tasks if t.status == "planned"]
             pool_tasks = await self.task_service.list_pool(user_id)
             text = render_evening_step1(plan, today_iso)
@@ -136,20 +170,29 @@ class ReminderScheduler:
 
     async def _send_morning_digest(self, user_id: int, today_iso: str) -> None:
         try:
-            plan = await self.task_service.get_day_plan(user_id, today_iso)
+            plan = await self.task_service.get_day_plan(user_id, today_iso, today_iso=today_iso)
+            deadlines = await self.task_service.list_upcoming_deadlines(user_id, today_iso, limit=4)
             text = "☀️ <b>Доброе утро! Вот твой план на день:</b>\n\n" + render_day_plan(
-                plan, today_iso
+                plan, today_iso, upcoming_deadlines=deadlines
             )
             kb = day_plan_kb(plan, today_iso)
             await self.bot.send_message(user_id, text, reply_markup=kb)
         except Exception:
             logger.exception("Failed to send morning digest to user %s", user_id)
 
+    async def _send_sunday_review(self, user_id: int, today_iso: str) -> None:
+        if not self.review_service:
+            return
+        try:
+            html = await self.review_service.build_weekly_review_html(user_id, today_iso)
+            await self.bot.send_message(user_id, html)
+        except Exception:
+            logger.exception("Failed to send Sunday review to user %s", user_id)
+
     async def _send_timed_task_alert(
         self, user_id: int, task_id: int, title: str, hhmm: str
     ) -> None:
         try:
-            # Create a lightweight snooze-able reminder entry or alert directly
             rem = await self.reminder_service.create_reminder(
                 user_id,
                 title,
@@ -166,14 +209,21 @@ class ReminderScheduler:
             logger.exception("Failed to send timed task alert to user %s", user_id)
 
     async def _send_class_alert(
-        self, user_id: int, title: str, start_time: str, location: str, lead_minutes: int
+        self,
+        user_id: int,
+        title: str,
+        start_time: str,
+        location: str,
+        meeting_info: str,
+        lead_minutes: int,
     ) -> None:
         try:
             loc = f"\n📍 <i>{escape(location)}</i>" if location else ""
+            meet = f"\n🔗 <code>{escape(meeting_info)}</code>" if meeting_info else ""
             await self.bot.send_message(
                 user_id,
                 f"🎓 <b>Через {lead_minutes} мин пара ({escape(start_time)}):</b>\n"
-                f"• {escape(title)}{loc}",
+                f"• {escape(title)}{loc}{meet}",
             )
         except Exception:
             logger.exception("Failed to send class alert to user %s", user_id)

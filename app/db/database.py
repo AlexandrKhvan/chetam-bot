@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     morning_digest_enabled INTEGER NOT NULL DEFAULT 1,
     class_reminder_minutes INTEGER NOT NULL DEFAULT 15,
     study_group TEXT NOT NULL DEFAULT '',
+    onboarded INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -36,6 +37,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority INTEGER NOT NULL DEFAULT 2,
     planned_date TEXT,
     planned_time TEXT,
+    deadline_date TEXT,
+    tags TEXT NOT NULL DEFAULT '',
+    recurrence_rule TEXT NOT NULL DEFAULT '',
+    parent_template_id INTEGER,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     completed_at TEXT,
@@ -45,6 +50,19 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_date ON tasks (user_id, planned_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_deadline ON tasks (user_id, deadline_date);
+
+CREATE TABLE IF NOT EXISTS subtasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    is_done INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks (task_id, sort_order, id);
 
 CREATE TABLE IF NOT EXISTS schedule_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +73,7 @@ CREATE TABLE IF NOT EXISTS schedule_events (
     title TEXT NOT NULL,
     location TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    meeting_info TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT 'manual',
     is_done INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -63,6 +82,23 @@ CREATE TABLE IF NOT EXISTS schedule_events (
 
 CREATE INDEX IF NOT EXISTS idx_schedule_user_date
     ON schedule_events (user_id, event_date, start_time);
+
+CREATE TABLE IF NOT EXISTS shared_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_code TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    meeting_info TEXT NOT NULL DEFAULT '',
+    uploaded_by INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_group_date
+    ON shared_schedules (group_code, event_date, start_time);
 
 CREATE TABLE IF NOT EXISTS task_history_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,18 +147,28 @@ class Database:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self.connect() as conn:
             await conn.executescript(SCHEMA_SQL)
-            # Safe additive migration for existing DBs
-            cur = await conn.execute("PRAGMA table_info(users)")
-            cols = {row["name"] for row in await cur.fetchall()}
-            if "study_group" not in cols:
-                await conn.execute(
-                    "ALTER TABLE users ADD COLUMN study_group TEXT NOT NULL DEFAULT ''"
-                )
-            if "class_reminder_minutes" not in cols:
-                await conn.execute(
-                    "ALTER TABLE users ADD COLUMN class_reminder_minutes INTEGER NOT NULL DEFAULT 15"
-                )
+            await self._ensure_column(conn, "users", "study_group", "TEXT NOT NULL DEFAULT ''")
+            await self._ensure_column(
+                conn, "users", "class_reminder_minutes", "INTEGER NOT NULL DEFAULT 15"
+            )
+            await self._ensure_column(conn, "users", "onboarded", "INTEGER NOT NULL DEFAULT 0")
+            await self._ensure_column(conn, "tasks", "deadline_date", "TEXT")
+            await self._ensure_column(conn, "tasks", "tags", "TEXT NOT NULL DEFAULT ''")
+            await self._ensure_column(conn, "tasks", "recurrence_rule", "TEXT NOT NULL DEFAULT ''")
+            await self._ensure_column(conn, "tasks", "parent_template_id", "INTEGER")
+            await self._ensure_column(
+                conn, "schedule_events", "meeting_info", "TEXT NOT NULL DEFAULT ''"
+            )
             await conn.commit()
+
+    @staticmethod
+    async def _ensure_column(
+        conn: aiosqlite.Connection, table: str, column: str, ddl_type: str
+    ) -> None:
+        cur = await conn.execute(f"PRAGMA table_info({table})")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if column not in cols:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -195,6 +241,7 @@ class Database:
         morning_digest_enabled: bool | None = None,
         class_reminder_minutes: int | None = None,
         study_group: str | None = None,
+        onboarded: bool | None = None,
     ) -> UserProfile | None:
         updates: list[str] = []
         params: list[object] = []
@@ -219,6 +266,9 @@ class Database:
         if study_group is not None:
             updates.append("study_group = ?")
             params.append(study_group.strip())
+        if onboarded is not None:
+            updates.append("onboarded = ?")
+            params.append(int(onboarded))
 
         if not updates:
             return await self.get_user(user_id)
@@ -236,6 +286,7 @@ class Database:
 
     @staticmethod
     def _row_to_user(row: aiosqlite.Row) -> UserProfile:
+        keys = set(row.keys())
         return UserProfile(
             user_id=row["user_id"],
             username=row["username"],
@@ -246,10 +297,9 @@ class Database:
             evening_reminder_enabled=bool(row["evening_reminder_enabled"]),
             morning_digest_enabled=bool(row["morning_digest_enabled"]),
             class_reminder_minutes=(
-                int(row["class_reminder_minutes"])
-                if "class_reminder_minutes" in row.keys()
-                else 15
+                int(row["class_reminder_minutes"]) if "class_reminder_minutes" in keys else 15
             ),
-            study_group=row["study_group"] if "study_group" in row.keys() else "",
+            study_group=row["study_group"] if "study_group" in keys else "",
+            onboarded=bool(row["onboarded"]) if "onboarded" in keys else False,
             created_at=row["created_at"],
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -19,7 +20,9 @@ SYSTEM_PROMPT = """Ты парсер учебного расписания. Из
     "end_time": "HH:MM",
     "title": "Название предмета/занятия",
     "location": "Аудитория или ссылка (если есть, иначе пустая строка)",
-    "notes": "Преподаватель/тип пары/подгруппа (если есть, иначе пустая строка)"
+    "notes": "Преподаватель/тип пары/подгруппа (если есть, иначе пустая строка)",
+    "meeting_info": "Zoom ID/пароль или ссылка на онлайн-встречу (если есть, иначе пустая строка)",
+    "group_tag": "Код группы если их несколько (например ВМ-21), иначе пустая строка"
   }
 ]
 Правила:
@@ -65,6 +68,8 @@ def _dicts_to_items(raw_items: list[dict]) -> list[ParsedScheduleItem]:
                 title=title,
                 location=str(entry.get("location", "")).strip(),
                 notes=str(entry.get("notes", "")).strip(),
+                meeting_info=str(entry.get("meeting_info", "")).strip(),
+                group_tag=str(entry.get("group_tag", "")).strip().upper(),
             )
         )
     items.sort(key=lambda x: (x.event_date, x.start_time, x.title))
@@ -78,6 +83,10 @@ class VisionScheduleParser:
     @property
     def is_enabled(self) -> bool:
         return self.settings.has_vision_configured
+
+    @property
+    def voice_enabled(self) -> bool:
+        return self.settings.has_voice_configured
 
     async def parse_image(
         self,
@@ -93,10 +102,9 @@ class VisionScheduleParser:
             f"Опорная дата (сегодня): {ref}. "
             "Распознай расписание на изображении и верни JSON-массив."
         )
-        if self.settings.vision_provider == "gemini":
-            raw = await self._call_gemini(user_prompt, image_bytes=image_bytes, mime_type=mime_type)
-        else:
-            raw = await self._call_openai(user_prompt, image_bytes=image_bytes, mime_type=mime_type)
+        raw = await self._invoke_model(
+            SYSTEM_PROMPT, user_prompt, image_bytes=image_bytes, mime_type=mime_type
+        )
         return _dicts_to_items(_extract_json_array(raw))
 
     async def parse_text(
@@ -112,14 +120,91 @@ class VisionScheduleParser:
             f"Опорная дата (сегодня): {ref}.\n"
             f"Текст расписания из документа:\n{schedule_text[:15000]}"
         )
-        if self.settings.vision_provider == "gemini":
-            raw = await self._call_gemini(user_prompt)
-        else:
-            raw = await self._call_openai(user_prompt)
+        raw = await self._invoke_model(SYSTEM_PROMPT, user_prompt)
         return _dicts_to_items(_extract_json_array(raw))
+
+    async def generate_text(self, system_prompt: str, user_prompt: str) -> str:
+        if not self.is_enabled:
+            raise RuntimeError("AI provider is not configured")
+        return await self._invoke_model(system_prompt, user_prompt)
+
+    async def transcribe_audio(
+        self, audio_bytes: bytes, *, mime_type: str = "audio/ogg", filename: str = "voice.ogg"
+    ) -> str:
+        """Transcribes voice note audio into clean Russian/English text using Gemini or OpenAI Whisper."""
+        if self.settings.gemini_api_key.strip():
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{self.settings.gemini_model}:generateContent"
+            )
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": (
+                                    "Точно расшифруй голосовое сообщение на языке оригинала (обычно русский). "
+                                    "Верни только текст расшифровки без пояснений."
+                                )
+                            },
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": base64.b64encode(audio_bytes).decode("ascii"),
+                                }
+                            },
+                        ]
+                    }
+                ],
+                "generationConfig": {"temperature": 0.0},
+            }
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    url, params={"key": self.settings.gemini_api_key}, json=payload
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return "".join(p.get("text", "") for p in parts).strip()
+
+        if self.settings.openai_api_key.strip():
+            url = f"{self.settings.openai_base_url.rstrip('/')}/audio/transcriptions"
+            headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
+            files = {"file": (filename, audio_bytes, mime_type)}
+            form_data = {"model": "whisper-1", "language": "ru"}
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, headers=headers, files=files, data=form_data)
+                resp.raise_for_status()
+                return str(resp.json().get("text", "")).strip()
+
+        raise RuntimeError("Voice transcription provider is not configured")
+
+    async def _invoke_model(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        image_bytes: bytes | None = None,
+        mime_type: str = "image/jpeg",
+    ) -> str:
+        if self.settings.vision_provider == "gemini":
+            return await self._call_gemini(
+                system_prompt, user_prompt, image_bytes=image_bytes, mime_type=mime_type
+            )
+        if self.settings.vision_provider == "bedrock":
+            return await self._call_bedrock(
+                system_prompt, user_prompt, image_bytes=image_bytes, mime_type=mime_type
+            )
+        return await self._call_openai(
+            system_prompt, user_prompt, image_bytes=image_bytes, mime_type=mime_type
+        )
 
     async def _call_gemini(
         self,
+        system_prompt: str,
         prompt: str,
         *,
         image_bytes: bytes | None = None,
@@ -129,7 +214,7 @@ class VisionScheduleParser:
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.settings.gemini_model}:generateContent"
         )
-        parts: list[dict] = [{"text": f"{SYSTEM_PROMPT}\n\n{prompt}"}]
+        parts: list[dict] = [{"text": f"{system_prompt}\n\n{prompt}"}]
         if image_bytes is not None:
             parts.append(
                 {
@@ -153,12 +238,13 @@ class VisionScheduleParser:
             data = resp.json()
         candidates = data.get("candidates", [])
         if not candidates:
-            return "[]"
+            return ""
         content_parts = candidates[0].get("content", {}).get("parts", [])
         return "".join(p.get("text", "") for p in content_parts)
 
     async def _call_openai(
         self,
+        system_prompt: str,
         prompt: str,
         *,
         image_bytes: bytes | None = None,
@@ -178,7 +264,7 @@ class VisionScheduleParser:
             "model": self.settings.openai_model,
             "temperature": 0.1,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
         }
@@ -189,5 +275,32 @@ class VisionScheduleParser:
             data = resp.json()
         choices = data.get("choices", [])
         if not choices:
-            return "[]"
-        return choices[0].get("message", {}).get("content", "[]")
+            return ""
+        return choices[0].get("message", {}).get("content", "")
+
+    async def _call_bedrock(
+        self,
+        system_prompt: str,
+        prompt: str,
+        *,
+        image_bytes: bytes | None = None,
+        mime_type: str = "image/jpeg",
+    ) -> str:
+        def _sync_converse() -> str:
+            import boto3
+
+            client = boto3.client("bedrock-runtime", region_name=self.settings.aws_region)
+            content: list[dict] = [{"text": prompt}]
+            if image_bytes is not None:
+                fmt = "png" if "png" in mime_type else ("webp" if "webp" in mime_type else "jpeg")
+                content.append({"image": {"format": fmt, "source": {"bytes": image_bytes}}})
+            resp = client.converse(
+                modelId=self.settings.bedrock_model_id,
+                system=[{"text": system_prompt}],
+                messages=[{"role": "user", "content": content}],
+                inferenceConfig={"temperature": 0.1, "maxTokens": 2500},
+            )
+            blocks = resp.get("output", {}).get("message", {}).get("content", [])
+            return "".join(b.get("text", "") for b in blocks if "text" in b)
+
+        return await asyncio.to_thread(_sync_converse)

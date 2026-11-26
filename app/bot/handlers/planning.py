@@ -18,6 +18,7 @@ from app.bot.keyboards import (
     evening_step2_kb,
 )
 from app.db.models import UserProfile
+from app.services.schedule_service import compute_free_windows
 from app.services.task_service import TaskService
 from app.services.time_utils import user_today_iso, user_tomorrow_iso
 
@@ -27,9 +28,9 @@ router = Router(name="planning")
 async def _build_step1(task_service: TaskService, user: UserProfile):
     today_iso = user_today_iso(user.timezone)
     tomorrow_iso = user_tomorrow_iso(user.timezone)
-    plan = await task_service.get_day_plan(user.user_id, today_iso)
+    plan = await task_service.get_day_plan(user.user_id, today_iso, today_iso=today_iso)
     pending = [t for t in plan.tasks if t.status == "planned"]
-    pool_tasks = await task_service.list_pool(user.user_id)
+    pool_tasks = await task_service.list_pool(user.user_id, today_iso=today_iso)
     return (
         render_evening_step1(plan, today_iso),
         evening_step1_kb(pending, today_iso, tomorrow_iso, pool_count=len(pool_tasks)),
@@ -39,11 +40,12 @@ async def _build_step1(task_service: TaskService, user: UserProfile):
 async def _build_step2(task_service: TaskService, user: UserProfile):
     today_iso = user_today_iso(user.timezone)
     tomorrow_iso = user_tomorrow_iso(user.timezone)
-    tomorrow_plan = await task_service.get_day_plan(user.user_id, tomorrow_iso)
-    inbox_tasks = await task_service.list_inbox(user.user_id)
-    pool_tasks = await task_service.list_pool(user.user_id)
+    tomorrow_plan = await task_service.get_day_plan(user.user_id, tomorrow_iso, today_iso=today_iso)
+    inbox_tasks = await task_service.list_inbox(user.user_id, today_iso=today_iso)
+    pool_tasks = await task_service.list_pool(user.user_id, today_iso=today_iso)
+    windows = compute_free_windows(tomorrow_plan.schedule_events) if tomorrow_plan.schedule_events else None
     return (
-        render_evening_step2(tomorrow_plan, inbox_tasks, today_iso),
+        render_evening_step2(tomorrow_plan, inbox_tasks, today_iso, free_windows=windows),
         evening_step2_kb(inbox_tasks, tomorrow_iso, pool_count=len(pool_tasks)),
     )
 

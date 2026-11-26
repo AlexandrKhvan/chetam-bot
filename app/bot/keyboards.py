@@ -89,16 +89,26 @@ def day_plan_kb(plan: DayPlan, today_iso: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=label, callback_data=f"ev:tog:{ev.id}:{plan.day}")]
         )
 
+    next_day = shift_date_iso(plan.day, 1)
     for task in plan.tasks:
         icon = "✅" if task.status == "done" else "⬜"
         time_prefix = f"{task.planned_time} " if task.planned_time else ""
-        label = f"{icon} {time_prefix}{_clip(task.title, 30)}"
-        rows.append(
-            [InlineKeyboardButton(text=label, callback_data=f"tk:tog:{task.id}:{plan.day}")]
-        )
+        if task.status == "done":
+            label = f"{icon} {time_prefix}{_clip(task.title, 30)}"
+            rows.append(
+                [InlineKeyboardButton(text=label, callback_data=f"tk:tog:{task.id}:{plan.day}")]
+            )
+        else:
+            label = f"{icon} {time_prefix}{_clip(task.title, 22)}"
+            rows.append(
+                [
+                    InlineKeyboardButton(text=label, callback_data=f"tk:tog:{task.id}:{plan.day}"),
+                    InlineKeyboardButton(text="➡️", callback_data=f"tk:qmv:{task.id}:{plan.day}:{next_day}"),
+                    InlineKeyboardButton(text="🗂", callback_data=f"tk:qpool:{task.id}:{plan.day}"),
+                ]
+            )
 
     prev_day = shift_date_iso(plan.day, -1)
-    next_day = shift_date_iso(plan.day, 1)
 
     rows.append(
         [
@@ -231,9 +241,30 @@ def inbox_kb(
 
 
 def pool_kb(
-    tasks: list[Task], today_iso: str, tomorrow_iso: str, page: int = 0, page_size: int = 6
+    tasks: list[Task],
+    today_iso: str,
+    tomorrow_iso: str,
+    *,
+    tags: list[str] | None = None,
+    active_tag: str = "",
+    page: int = 0,
+    page_size: int = 6,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if tags:
+        tag_row: list[InlineKeyboardButton] = [
+            InlineKeyboardButton(
+                text=("🎯 Все" if not active_tag else "Все"),
+                callback_data="pl:tag:ALL",
+            )
+        ]
+        for tg_name in tags[:4]:
+            mark = "🎯 " if tg_name == active_tag else ""
+            tag_row.append(
+                InlineKeyboardButton(text=f"{mark}#{tg_name}", callback_data=f"pl:tag:{tg_name}")
+            )
+        rows.append(tag_row)
+
     start = page * page_size
     chunk = tasks[start : start + page_size]
 
@@ -242,15 +273,15 @@ def pool_kb(
             [
                 InlineKeyboardButton(
                     text=f"• {_clip(task.title, 16)}",
-                    callback_data=f"pl:prio:{task.id}:{page}",
+                    callback_data=f"pl:prio:{task.id}:{page}:{active_tag or 'ALL'}",
                 ),
                 InlineKeyboardButton(
                     text="📅",
-                    callback_data=f"pl:plan:{task.id}:{today_iso}:{page}",
+                    callback_data=f"pl:plan:{task.id}:{today_iso}:{page}:{active_tag or 'ALL'}",
                 ),
                 InlineKeyboardButton(
                     text="🌅",
-                    callback_data=f"pl:plan:{task.id}:{tomorrow_iso}:{page}",
+                    callback_data=f"pl:plan:{task.id}:{tomorrow_iso}:{page}:{active_tag or 'ALL'}",
                 ),
                 InlineKeyboardButton(
                     text="🔔",
@@ -258,7 +289,7 @@ def pool_kb(
                 ),
                 InlineKeyboardButton(
                     text="🗑",
-                    callback_data=f"pl:del:{task.id}:{page}",
+                    callback_data=f"pl:del:{task.id}:{page}:{active_tag or 'ALL'}",
                 ),
             ]
         )
@@ -267,10 +298,18 @@ def pool_kb(
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(text="◀️", callback_data=f"pl:pg:{page - 1}"))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀️", callback_data=f"pl:pg:{page - 1}:{active_tag or 'ALL'}"
+                )
+            )
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
         if page + 1 < total_pages:
-            nav.append(InlineKeyboardButton(text="▶️", callback_data=f"pl:pg:{page + 1}"))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶️", callback_data=f"pl:pg:{page + 1}:{active_tag or 'ALL'}"
+                )
+            )
         rows.append(nav)
 
     rows.append(
@@ -429,22 +468,37 @@ def reminder_fired_kb(reminder_id: int, task_id: int | None = None) -> InlineKey
     )
 
 
-def schedule_week_kb(anchor_iso: str, start_iso: str, end_iso: str, today_iso: str) -> InlineKeyboardMarkup:
+def schedule_week_kb(
+    anchor_iso: str,
+    start_iso: str,
+    end_iso: str,
+    today_iso: str,
+    *,
+    shared_group: str = "",
+) -> InlineKeyboardMarkup:
     prev_w = shift_date_iso(anchor_iso, -7)
     next_w = shift_date_iso(anchor_iso, 7)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
+        [
+            InlineKeyboardButton(text="◀️ Пред. нед.", callback_data=f"sch:wk:{prev_w}"),
+            InlineKeyboardButton(text="Текущая", callback_data=f"sch:wk:{today_iso}"),
+            InlineKeyboardButton(text="След. нед. ▶️", callback_data=f"sch:wk:{next_w}"),
+        ],
+        [
+            InlineKeyboardButton(text="➕ Добавить / вставить", callback_data="sch:add"),
+            InlineKeyboardButton(text="🗑 Очистить неделю", callback_data=f"sch:clr:{start_iso}:{end_iso}"),
+        ],
+    ]
+    if shared_group:
+        rows.append(
             [
-                InlineKeyboardButton(text="◀️ Пред. нед.", callback_data=f"sch:wk:{prev_w}"),
-                InlineKeyboardButton(text="Текущая", callback_data=f"sch:wk:{today_iso}"),
-                InlineKeyboardButton(text="След. нед. ▶️", callback_data=f"sch:wk:{next_w}"),
-            ],
-            [
-                InlineKeyboardButton(text="➕ Добавить пару", callback_data="sch:add"),
-                InlineKeyboardButton(text="🗑 Очистить неделю", callback_data=f"sch:clr:{start_iso}:{end_iso}"),
-            ],
-        ]
-    )
+                InlineKeyboardButton(
+                    text=f"🔄 Подтянуть общее расписание {shared_group}",
+                    callback_data=f"sch:sync:{shared_group}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def schedule_import_confirm_kb(
@@ -470,6 +524,15 @@ def schedule_import_confirm_kb(
             )
         ]
     )
+    if selected_group:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"👥 Сохранить + поделиться с {selected_group}",
+                    callback_data="sch:imp:share",
+                )
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(
@@ -479,6 +542,35 @@ def schedule_import_confirm_kb(
             InlineKeyboardButton(text="❌ Отмена", callback_data="sch:imp:cancel"),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def onboarding_tz_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🕒 Москва (+03)", callback_data="onb:tz:Europe/Moscow"),
+                InlineKeyboardButton(text="🕒 Екб / Астана (+05)", callback_data="onb:tz:Asia/Yekaterinburg"),
+            ],
+            [
+                InlineKeyboardButton(text="🕒 Омск / Алматы (+06)", callback_data="onb:tz:Asia/Almaty"),
+                InlineKeyboardButton(text="🕒 Новосибирск (+07)", callback_data="onb:tz:Asia/Novosibirsk"),
+            ],
+            [
+                InlineKeyboardButton(text="⏭ Пропустить настройку", callback_data="onb:skip"),
+            ],
+        ]
+    )
+
+
+def onboarding_group_kb(shared_groups: list[str] | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    presets = list(dict.fromkeys([*(shared_groups or []), "ВМ-21", "ВМ-22"]))[:4]
+    if presets:
+        rows.append(
+            [InlineKeyboardButton(text=f"🎓 {g}", callback_data=f"onb:grp:{g}") for g in presets[:3]]
+        )
+    rows.append([InlineKeyboardButton(text="⏭ Без группы / настрою позже", callback_data="onb:skip")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

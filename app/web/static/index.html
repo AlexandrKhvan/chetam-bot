@@ -37,13 +37,24 @@
           <p id="day-progress-sub" class="muted-small">0 из 0 выполнено</p>
         </div>
 
+        <div id="day-deadlines-card" class="card deadline-banner hidden">
+          <h2 class="section-heading" style="margin:0 0 6px;color:var(--amber)">🔥 Ближайшие дедлайны</h2>
+          <div id="day-deadlines-list" class="deadline-list"></div>
+        </div>
+
         <form id="day-quick-add" class="quick-form" autocomplete="off">
-          <input id="day-add-input" class="input" type="text" placeholder="Добавить задачу (или кучу мыслей)…" required />
+          <input id="day-add-input" class="input" type="text" placeholder="Задача, #тег, до 30.11, каждый день…" required />
           <button class="btn-primary" type="submit">＋</button>
         </form>
 
-        <div id="day-schedule-block" class="section-block hidden">
-          <h2 class="section-heading">🎓 Расписание учёбы</h2>
+        <div id="day-schedule-block" class="section-block">
+          <div class="section-head-row">
+            <h2 class="section-heading">🎓 Расписание учёбы</h2>
+            <label class="upload-pill" title="Загрузить .docx, .ics, .xlsx, .csv, .pdf или фото">
+              📤 Импорт
+              <input id="schedule-file-input" type="file" accept=".docx,.ics,.xlsx,.csv,.pdf,.txt,.png,.jpg,.jpeg,.webp" hidden />
+            </label>
+          </div>
           <div id="day-schedule-list" class="item-list"></div>
         </div>
 
@@ -71,6 +82,7 @@
 
         <div class="section-block">
           <h2 id="inbox-heading" class="section-heading">📥 Входящие</h2>
+          <div id="pool-tags-bar" class="tags-bar hidden"></div>
           <div id="inbox-list" class="item-list"></div>
         </div>
       </section>
@@ -90,6 +102,7 @@
 
         <div class="section-block">
           <h2 id="evening-tomorrow-heading" class="section-heading">🌅 Завтра: пары и план</h2>
+          <div id="evening-free-windows" class="tags-bar hidden"></div>
           <div id="evening-tomorrow-schedule" class="item-list"></div>
           <div id="evening-tomorrow-tasks" class="item-list"></div>
         </div>

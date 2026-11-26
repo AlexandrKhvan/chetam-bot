@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import date
 from html import escape
 
 from app.db.models import (
     DailySummary,
     DayPlan,
+    FreeWindow,
     ParsedScheduleItem,
     PeriodStats,
     Reminder,
@@ -28,35 +30,88 @@ def render_progress_bar(done: int, total: int, width: int = 10) -> str:
     return f"{'▓' * filled}{'░' * (width - filled)} {done}/{total} ({pct}%)"
 
 
+def format_deadline_badge(deadline_iso: str | None, today_iso: str) -> str:
+    if not deadline_iso:
+        return ""
+    try:
+        diff = (date.fromisoformat(deadline_iso) - date.fromisoformat(today_iso)).days
+    except ValueError:
+        return ""
+    if diff < 0:
+        return f"🚨 просрочено {-diff} дн."
+    if diff == 0:
+        return "🔥 дедлайн сегодня"
+    if diff <= 3:
+        return f"⏳ {diff} дн."
+    d = date.fromisoformat(deadline_iso)
+    return f"📅 до {d.day:02d}.{d.month:02d}"
+
+
 def _format_event_line(event: ScheduleEvent) -> str:
     icon = "✅" if event.is_done else "▫️"
     time_part = f"{event.start_time}–{event.end_time}" if event.end_time else event.start_time
     title = escape(event.title)
     loc = f" · <i>{escape(event.location)}</i>" if event.location else ""
     body = f"<b>{escape(time_part)}</b> {title}{loc}"
-    if event.is_done:
-        return f"{icon} <s>{body}</s>"
-    return f"{icon} {body}"
+    line = f"{icon} <s>{body}</s>" if event.is_done else f"{icon} {body}"
+    if event.meeting_info and not event.is_done:
+        line += f"\n      🔗 <code>{escape(event.meeting_info)}</code>"
+    return line
 
 
-def _format_task_line(task: Task) -> str:
+def _format_task_line(task: Task, today_iso: str = "") -> str:
     icon = "✅" if task.status == "done" else "⬜"
     prio = PRIORITY_ICON.get(task.priority, "🟡")
     time_prefix = f"<code>{escape(task.planned_time)}</code> " if task.planned_time else ""
     title = escape(task.title)
-    carry = f" <i>(↻{task.carried_over_count})</i>" if task.carried_over_count > 0 else ""
+    extras: list[str] = []
+    if task.recurrence_rule:
+        extras.append("🔁")
+    if task.subtasks:
+        sub_done = sum(1 for s in task.subtasks if s.is_done)
+        extras.append(f"☑️{sub_done}/{len(task.subtasks)}")
+    if task.deadline_date and today_iso and task.status != "done":
+        badge = format_deadline_badge(task.deadline_date, today_iso)
+        if badge:
+            extras.append(badge)
+    if task.tags:
+        extras.append(" ".join(f"#{escape(t)}" for t in task.tags[:3]))
+    if task.carried_over_count > 0:
+        extras.append(f"↻{task.carried_over_count}")
+
+    suffix = f" <i>({' · '.join(extras)})</i>" if extras else ""
     if task.status == "done":
         return f"{icon} <s>{time_prefix}{title}</s>"
-    return f"{icon} {prio} {time_prefix}{title}{carry}"
+    return f"{icon} {prio} {time_prefix}{title}{suffix}"
 
 
-def render_day_plan(plan: DayPlan, today_iso: str, *, manage_mode: bool = False) -> str:
+def render_day_plan(
+    plan: DayPlan,
+    today_iso: str,
+    *,
+    manage_mode: bool = False,
+    upcoming_deadlines: list[Task] | None = None,
+) -> str:
     header = f"📅 <b>{escape(format_date_ru(plan.day, today_iso))}</b>"
     lines = [header]
 
     if plan.total_items > 0:
         lines.append(f"<code>{render_progress_bar(plan.done_items, plan.total_items)}</code>")
     lines.append("")
+
+    if upcoming_deadlines and plan.day == today_iso:
+        urgent = []
+        today_d = date.fromisoformat(today_iso)
+        for dl in upcoming_deadlines:
+            if dl.deadline_date:
+                diff = (date.fromisoformat(dl.deadline_date) - today_d).days
+                if diff <= 5:
+                    urgent.append((dl, format_deadline_badge(dl.deadline_date, today_iso)))
+        if urgent:
+            lines.append("<b>🔥 Ближайшие дедлайны:</b>")
+            for dl, badge in urgent[:3]:
+                lines.append(f"  • {escape(dl.title)} — <b>{badge}</b>")
+            lines.append("")
 
     if plan.schedule_events:
         lines.append("<b>🎓 Расписание:</b>")
@@ -67,30 +122,47 @@ def render_day_plan(plan: DayPlan, today_iso: str, *, manage_mode: bool = False)
     if plan.tasks:
         lines.append("<b>📋 Задачи:</b>")
         for task in plan.tasks:
-            lines.append(_format_task_line(task))
+            lines.append(_format_task_line(task, today_iso))
     elif not plan.schedule_events:
         lines.append("<i>На этот день пока ничего не запланировано.</i>")
-        lines.append("Нажми <b>➕ Задача</b>, выбери из <b>📥 Инбокса</b> или запусти <b>🌙 Вечерний план</b>.")
+        lines.append("Нажми <b>➕ Задача</b>, выбери из <b>📥 Инбокса</b> / <b>🗂 Пула</b> или запусти <b>🌙 Вечерний план</b>.")
     else:
         lines.append("<b>📋 Задачи:</b> <i>пока пусто</i>")
 
     if manage_mode:
         lines.append("")
-        lines.append("⚙️ <i>Режим управления: перенос, приоритет и удаление задач.</i>")
+        lines.append("⚙️ <i>Режим правки: приоритет, напоминание 🔔, перенос, пул 🗂 и удаление.</i>")
     elif plan.total_items > 0:
         lines.append("")
-        lines.append("<i>Нажимай на пункты ниже, чтобы ставить галочки.</i>")
+        lines.append("<i>Тап по задаче ставит галочку · ➡️ на завтра · 🗂 в общий пул.</i>")
 
     return "\n".join(lines)
 
 
-def render_inbox(tasks: list[Task], page: int = 0, page_size: int = 6) -> str:
+def render_deadlines(tasks: list[Task], today_iso: str) -> str:
+    lines = [f"⏳ <b>Ближайшие дедлайны</b> ({len(tasks)})"]
+    if not tasks:
+        lines.append("")
+        lines.append("<i>Активных дедлайнов нет — всё спокойно! ✨</i>")
+        lines.append("Чтобы задать дедлайн, просто напиши: <code>сдать лабу №4 до 30.11</code> или <code>отчёт к пятнице</code>.")
+        return "\n".join(lines)
+
+    lines.append("<i>За 3 дня до срока срочность задачи автоматически повышается до 🔴.</i>")
+    lines.append("")
+    for idx, t in enumerate(tasks, start=1):
+        prio = PRIORITY_ICON.get(t.priority, "🟡")
+        badge = format_deadline_badge(t.deadline_date, today_iso)
+        lines.append(f"{idx}. {prio} <b>{escape(t.title)}</b> — {badge}")
+    return "\n".join(lines)
+
+
+def render_inbox(tasks: list[Task], today_iso: str = "", page: int = 0, page_size: int = 6) -> str:
     total = len(tasks)
     lines = [f"📥 <b>Инбокс</b> ({total})"]
     if not tasks:
         lines.append("")
         lines.append("<i>Инбокс пуст — голова свободна! ✨</i>")
-        lines.append("Просто напиши сюда любую мысль или задачу (хоть всё в кучу), и я сразу сохраню её.")
+        lines.append("Пиши сюда текстом (хоть всё в кучу), пересылай сообщения или отправляй голосовые.")
         return "\n".join(lines)
 
     start = page * page_size
@@ -98,30 +170,35 @@ def render_inbox(tasks: list[Task], page: int = 0, page_size: int = 6) -> str:
     lines.append("<i>Перекинь на сегодня/завтра, убери в 🗂 Пул «когда-нибудь» или разбери вечером.</i>")
     lines.append("")
     for idx, task in enumerate(chunk, start=start + 1):
-        prio = PRIORITY_ICON.get(task.priority, "🟡")
-        lines.append(f"{idx}. {prio} {escape(task.title)}")
+        lines.append(f"{idx}. {_format_task_line(task, today_iso)[2:]}")
     return "\n".join(lines)
 
 
-def render_pool(tasks: list[Task], page: int = 0, page_size: int = 6) -> str:
+def render_pool(
+    tasks: list[Task],
+    today_iso: str = "",
+    *,
+    active_tag: str = "",
+    page: int = 0,
+    page_size: int = 6,
+) -> str:
     total = len(tasks)
-    lines = [f"🗂 <b>Общий пул задач</b> ({total})"]
+    tag_part = f" · #{escape(active_tag)}" if active_tag else ""
+    lines = [f"🗂 <b>Общий пул задач</b> ({total}{tag_part})"]
     if not tasks:
         lines.append("")
-        lines.append("<i>Пул пока пуст.</i>")
+        lines.append("<i>Здесь пока пусто.</i>")
         lines.append(
-            "Сюда удобно складывать дела «на потом / когда будет время», чтобы не засорять Инбокс "
-            "и спокойно забирать их в план вечером."
+            "Складывай сюда дела «на потом / когда будет время» с тегами вроде <code>#учёба</code> или <code>#проект</code>."
         )
         return "\n".join(lines)
 
     start = page * page_size
     chunk = tasks[start : start + page_size]
-    lines.append("<i>Задачи без жёсткой даты. Забирай их на сегодня/завтра или на вечернем планировании.</i>")
+    lines.append("<i>Задачи без жёсткой даты. Фильтруй по #тегам и забирай в план вечером.</i>")
     lines.append("")
     for idx, task in enumerate(chunk, start=start + 1):
-        prio = PRIORITY_ICON.get(task.priority, "🟡")
-        lines.append(f"{idx}. {prio} {escape(task.title)}")
+        lines.append(f"{idx}. {_format_task_line(task, today_iso)[2:]}")
     return "\n".join(lines)
 
 
@@ -141,8 +218,7 @@ def render_evening_pool_picker(
     lines.append("")
     start = page * page_size
     for idx, t in enumerate(pool_tasks[start : start + page_size], start=start + 1):
-        prio = PRIORITY_ICON.get(t.priority, "🟡")
-        lines.append(f"{idx}. {prio} {escape(t.title)}")
+        lines.append(f"{idx}. {_format_task_line(t, today_iso)[2:]}")
     return "\n".join(lines)
 
 
@@ -182,8 +258,7 @@ def render_evening_step1(today_plan: DayPlan, today_iso: str) -> str:
         lines.append("Реши судьбу каждой или перенеси всё на завтра одним нажатием:")
         lines.append("")
         for idx, t in enumerate(pending, start=1):
-            prio = PRIORITY_ICON.get(t.priority, "🟡")
-            lines.append(f"{idx}. {prio} {escape(t.title)}")
+            lines.append(f"{idx}. {_format_task_line(t, today_iso)[2:]}")
     else:
         lines.append("🎉 <b>Все задачи на сегодня закрыты!</b>")
         lines.append("Переходи к сборке расписания на завтра.")
@@ -191,7 +266,10 @@ def render_evening_step1(today_plan: DayPlan, today_iso: str) -> str:
 
 
 def render_evening_step2(
-    tomorrow_plan: DayPlan, inbox_tasks: list[Task], today_iso: str
+    tomorrow_plan: DayPlan,
+    inbox_tasks: list[Task],
+    today_iso: str,
+    free_windows: list[FreeWindow] | None = None,
 ) -> str:
     lines = [
         "🌙 <b>Вечернее планирование · Шаг 2/2: План на завтра</b>",
@@ -202,22 +280,29 @@ def render_evening_step2(
         lines.append("<b>🎓 Пары / события завтра:</b>")
         for ev in tomorrow_plan.schedule_events:
             lines.append(_format_event_line(ev))
+        if free_windows:
+            win_strs = []
+            for w in free_windows[:4]:
+                h, m = divmod(w.duration_minutes, 60)
+                dur = f"{h}ч {m}м" if h and m else (f"{h}ч" if h else f"{m}м")
+                win_strs.append(f"{w.start_time}–{w.end_time} ({dur})")
+            lines.append(f"🕒 <i>Свободные окна: {', '.join(win_strs)}</i>")
         lines.append("")
     else:
-        lines.append("🎓 <i>Расписание учёбы на завтра не загружено (можешь скинуть .docx или фото).</i>")
+        lines.append("🎓 <i>Расписание на завтра не загружено (можно скинуть .docx / .ics / .xlsx / .pdf / фото).</i>")
         lines.append("")
 
     if tomorrow_plan.tasks:
         lines.append(f"<b>📋 Уже в плане на завтра ({len(tomorrow_plan.tasks)}):</b>")
         for t in tomorrow_plan.tasks:
-            lines.append(_format_task_line(t))
+            lines.append(_format_task_line(t, today_iso))
         lines.append("")
 
     if inbox_tasks:
         lines.append(f"<b>📥 Выбери задачи из Инбокса ({len(inbox_tasks)}):</b>")
-        lines.append("<i>Нажимай на кнопки ниже — задачи сразу добавятся в план на завтра.</i>")
+        lines.append("<i>Нажимай на кнопки ниже или забери задачи из 🗂 Общего пула.</i>")
     else:
-        lines.append("📥 <i>Инбокс пуст — всё уже разобрано.</i>")
+        lines.append("📥 <i>Инбокс пуст — загляни в 🗂 Общий пул задач!</i>")
 
     return "\n".join(lines)
 
@@ -226,7 +311,7 @@ def render_week_schedule(
     start_iso: str, end_iso: str, events: list[ScheduleEvent], today_iso: str
 ) -> str:
     lines = [
-        f"🎓 <b>Расписание недели</b>",
+        "🎓 <b>Расписание недели</b>",
         f"🗓 {format_weekday_short_ru(start_iso)} — {format_weekday_short_ru(end_iso)}",
         "",
     ]
@@ -234,8 +319,8 @@ def render_week_schedule(
         lines.append("<i>На эту неделю расписание ещё не загружено.</i>")
         lines.append("")
         lines.append(
-            "Просто отправь мне <b>.docx файл</b> или <b>фото расписания</b> прямо в чат, "
-            "либо нажми <b>➕ Добавить пару</b>."
+            "Просто отправь мне <b>.docx, .ics, .xlsx, .csv, .pdf</b> или <b>фото расписания</b> прямо в чат, "
+            "либо нажми <b>➕ Добавить пару / вставить текстом</b>."
         )
         return "\n".join(lines)
 
@@ -269,14 +354,15 @@ def render_parsed_preview(
     for day_iso in sorted(by_day.keys()):
         lines.append(f"<b>{escape(format_date_ru(day_iso))}</b>")
         for item in by_day[day_iso]:
-            if shown >= 35:
+            if shown >= 30:
                 break
             time_part = f"{item.start_time}–{item.end_time}" if item.end_time else item.start_time
             loc = f" · <i>{escape(item.location)}</i>" if item.location else ""
-            lines.append(f"  ▫️ <b>{escape(time_part)}</b> {escape(item.title)}{loc}")
+            zm = " 🔗" if item.meeting_info else ""
+            lines.append(f"  ▫️ <b>{escape(time_part)}</b> {escape(item.title)}{loc}{zm}")
             shown += 1
         lines.append("")
-        if shown >= 35:
+        if shown >= 30:
             lines.append(f"<i>…и ещё {len(items) - shown} занятий</i>")
             break
     return "\n".join(lines).rstrip()
@@ -332,7 +418,6 @@ def render_period_stats(stats: PeriodStats) -> str:
         "<b>По дням:</b>",
     ]
 
-    # For 30-day view show the last 14 active/recent days cleanly so message stays compact
     rows = stats.daily_breakdown[-14:] if stats.days_count > 14 else stats.daily_breakdown
     for day_iso, done, planned in rows:
         label = format_weekday_short_ru(day_iso)
@@ -351,7 +436,7 @@ def render_settings(user: UserProfile, vision_enabled: bool) -> str:
     ev_state = "вкл ✅" if user.evening_reminder_enabled else "выкл 🔕"
     mo_state = "вкл ✅" if user.morning_digest_enabled else "выкл 🔕"
     cls_state = f"за {user.class_reminder_minutes} мин ✅" if user.class_reminder_minutes > 0 else "выкл 🔕"
-    vision_state = "подключён ✅" if vision_enabled else "не настроен (только .docx и ручной ввод)"
+    vision_state = "подключён ✅" if vision_enabled else "не настроен (файлы и текст работают офлайн)"
     grp_label = escape(user.study_group) if user.study_group else "не выбрана (все)"
     return "\n".join(
         [
@@ -362,6 +447,6 @@ def render_settings(user: UserProfile, vision_enabled: bool) -> str:
             f"🌙 Вечернее планирование: <b>{escape(user.evening_plan_time)}</b> ({ev_state})",
             f"☀️ Утренняя сводка: <b>{escape(user.morning_digest_time)}</b> ({mo_state})",
             f"🔔 Напоминание о парах: <b>{cls_state}</b>",
-            f"📷 Распознавание фото (AI): {vision_state}",
+            f"🤖 AI (фото / голос / ревью): {vision_state}",
         ]
     )

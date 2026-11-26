@@ -15,6 +15,17 @@ class UserProfile:
     morning_digest_enabled: bool = True
     class_reminder_minutes: int = 15
     study_group: str = ""
+    onboarded: bool = False
+    created_at: str = ""
+
+
+@dataclass(slots=True)
+class Subtask:
+    id: int
+    task_id: int
+    title: str
+    is_done: bool = False
+    sort_order: int = 0
     created_at: str = ""
 
 
@@ -28,10 +39,15 @@ class Task:
     priority: int = 2  # 1 = high, 2 = medium, 3 = low
     planned_date: str | None = None  # YYYY-MM-DD
     planned_time: str | None = None  # HH:MM
+    deadline_date: str | None = None  # YYYY-MM-DD
+    tags: list[str] = field(default_factory=list)
+    recurrence_rule: str = ""  # "" | "daily" | "weekdays" | "days:0,2,4"
+    parent_template_id: int | None = None
     sort_order: int = 0
     created_at: str = ""
     completed_at: str | None = None
     carried_over_count: int = 0
+    subtasks: list[Subtask] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -56,7 +72,8 @@ class ScheduleEvent:
     title: str = ""
     location: str = ""
     notes: str = ""
-    source: str = "manual"  # manual | docx | photo
+    meeting_info: str = ""  # Zoom ID / passcode / online link
+    source: str = "manual"  # manual | docx | photo | ics | xlsx | pdf | shared
     is_done: bool = False
     created_at: str = ""
 
@@ -81,6 +98,14 @@ class ParsedScheduleItem:
     location: str = ""
     notes: str = ""
     group_tag: str = ""
+    meeting_info: str = ""
+
+
+@dataclass(slots=True)
+class FreeWindow:
+    start_time: str  # HH:MM
+    end_time: str  # HH:MM
+    duration_minutes: int
 
 
 @dataclass(slots=True)

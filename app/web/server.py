@@ -5,22 +5,26 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.bot.formatters import format_deadline_badge
 from app.config import Settings, load_settings
 from app.db.database import Database
 from app.db.models import UserProfile
 from app.services.brain_dump import split_brain_dump
 from app.services.history_service import HistoryService
+from app.services.parsers.docx_parser import extract_detected_groups, filter_items_by_group
+from app.services.parsers.universal_parser import parse_schedule_file
+from app.services.parsers.vision_parser import VisionScheduleParser
 from app.services.reminder_service import (
     ReminderService,
     format_reminder_time_local,
     parse_reminder_input,
 )
-from app.services.schedule_service import ScheduleService
+from app.services.schedule_service import ScheduleService, compute_free_windows
 from app.services.task_service import TaskService
 from app.services.time_utils import (
     format_date_ru,
@@ -72,6 +76,23 @@ class SnoozeReminderRequest(BaseModel):
     minutes: int = Field(default=15, ge=1, le=10080)
 
 
+class SubtaskCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+
+
+def _serialize_task(task, today_iso: str) -> dict:
+    d = asdict(task)
+    d["deadline_badge"] = format_deadline_badge(task.deadline_date, today_iso) if task.deadline_date else ""
+    if task.deadline_date:
+        try:
+            d["deadline_days_left"] = (date.fromisoformat(task.deadline_date) - date.fromisoformat(today_iso)).days
+        except ValueError:
+            d["deadline_days_left"] = None
+    else:
+        d["deadline_days_left"] = None
+    return d
+
+
 def create_app(custom_settings: Settings | None = None) -> FastAPI:
     settings = custom_settings or load_settings()
     db = Database(settings.database_path)
@@ -79,6 +100,7 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
     schedule_service = ScheduleService(db)
     history_service = HistoryService(db)
     reminder_service = ReminderService(db)
+    vision_parser = VisionScheduleParser(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -158,7 +180,13 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid date format") from exc
 
-        plan = await task_service.get_day_plan(user.user_id, target)
+        plan = await task_service.get_day_plan(user.user_id, target, today_iso=today_iso)
+        deadlines = (
+            await task_service.list_upcoming_deadlines(user.user_id, today_iso, limit=5)
+            if target == today_iso
+            else []
+        )
+        windows = compute_free_windows(plan.schedule_events) if plan.schedule_events else []
         return {
             "day": plan.day,
             "label": format_date_ru(plan.day, today_iso),
@@ -166,18 +194,26 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
             "total_items": plan.total_items,
             "completion_rate": round(plan.completion_rate * 100),
             "schedule_events": [asdict(e) for e in plan.schedule_events],
-            "tasks": [asdict(t) for t in plan.tasks],
+            "free_windows": [asdict(w) for w in windows],
+            "deadlines": [_serialize_task(d, today_iso) for d in deadlines],
+            "tasks": [_serialize_task(t, today_iso) for t in plan.tasks],
         }
 
     @app.get("/api/inbox")
     async def api_inbox(user: UserProfile = Depends(get_current_user)):
-        tasks = await task_service.list_inbox(user.user_id)
-        return {"tasks": [asdict(t) for t in tasks]}
+        today_iso = user_today_iso(user.timezone)
+        tasks = await task_service.list_inbox(user.user_id, today_iso=today_iso)
+        return {"tasks": [_serialize_task(t, today_iso) for t in tasks]}
 
     @app.get("/api/pool")
-    async def api_pool(user: UserProfile = Depends(get_current_user)):
-        tasks = await task_service.list_pool(user.user_id)
-        return {"tasks": [asdict(t) for t in tasks]}
+    async def api_pool(
+        tag: str | None = Query(default=None),
+        user: UserProfile = Depends(get_current_user),
+    ):
+        today_iso = user_today_iso(user.timezone)
+        tags = await task_service.list_pool_tags(user.user_id)
+        tasks = await task_service.list_pool(user.user_id, tag=tag, today_iso=today_iso)
+        return {"tasks": [_serialize_task(t, today_iso) for t in tasks], "tags": tags}
 
     @app.post("/api/tasks/dump")
     async def api_tasks_dump(
@@ -185,6 +221,7 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
         user: UserProfile = Depends(get_current_user),
     ):
         today = user_today(user.timezone)
+        today_iso = today.isoformat()
         drafts = split_brain_dump(payload.text, today=today)
         bucket = "pool" if payload.target_bucket == "pool" else "inbox"
         created = []
@@ -195,11 +232,76 @@ def create_app(custom_settings: Settings | None = None) -> FastAPI:
                 d.title,
                 planned_date=planned_date,
                 planned_time=None if bucket == "pool" else d.planned_time,
+                deadline_date=d.deadline_date,
+                tags=d.tags,
+                recurrence_rule="" if bucket == "pool" else d.recurrence_rule,
                 priority=d.priority,
                 initial_status=bucket,
+                today_iso=today_iso,
             )
-            created.append(asdict(task))
+            created.append(_serialize_task(task, today_iso))
         return {"created": created, "count": len(created)}
+
+    @app.post("/api/tasks/{task_id}/subtasks")
+    async def api_add_subtask(
+        task_id: int,
+        payload: SubtaskCreateRequest,
+        user: UserProfile = Depends(get_current_user),
+    ):
+        sub = await task_service.add_subtask(user.user_id, task_id, payload.title)
+        if not sub:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return {"subtask": asdict(sub)}
+
+    @app.post("/api/subtasks/{subtask_id}/toggle")
+    async def api_toggle_subtask(subtask_id: int, user: UserProfile = Depends(get_current_user)):
+        sub = await task_service.toggle_subtask(user.user_id, subtask_id)
+        if not sub:
+            raise HTTPException(status_code=404, detail="Subtask not found")
+        return {"subtask": asdict(sub)}
+
+    @app.delete("/api/subtasks/{subtask_id}")
+    async def api_delete_subtask(subtask_id: int, user: UserProfile = Depends(get_current_user)):
+        ok = await task_service.delete_subtask(user.user_id, subtask_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Subtask not found")
+        return {"deleted": True}
+
+    @app.post("/api/schedule/upload")
+    async def api_upload_schedule(
+        file: UploadFile = File(...),
+        user: UserProfile = Depends(get_current_user),
+    ):
+        raw = await file.read()
+        if len(raw) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Файл слишком большой (лимит 10 МБ)")
+        filename = file.filename or "schedule.docx"
+        ref = user_today(user.timezone)
+        try:
+            items, source_code, _ = await parse_schedule_file(
+                filename,
+                raw,
+                reference_date=ref,
+                tz_name=user.timezone,
+                vision_parser=vision_parser,
+            )
+        except RuntimeError as exc:
+            if "VISION_NOT_CONFIGURED" in str(exc):
+                raise HTTPException(
+                    status_code=400, detail="AI для фото не настроен. Поддерживаются .docx, .ics, .xlsx, .csv, .pdf"
+                ) from exc
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        groups = extract_detected_groups(items)
+        if groups and user.study_group:
+            items = filter_items_by_group(items, user.study_group)
+
+        saved = await schedule_service.import_parsed_events(
+            user.user_id, items, source=source_code, replace_dates=True
+        )
+        return {"saved": saved, "groups": groups}
 
     @app.post("/api/tasks/{task_id}/toggle")
     async def api_toggle_task(task_id: int, user: UserProfile = Depends(get_current_user)):

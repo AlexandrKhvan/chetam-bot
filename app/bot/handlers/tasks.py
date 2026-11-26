@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import io
+import logging
 import re
 import secrets
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.formatters import PRIORITY_ICON, render_day_plan
+from app.bot.formatters import (
+    PRIORITY_ICON,
+    format_deadline_badge,
+    render_day_plan,
+    render_deadlines,
+)
 from app.bot.handlers.common import safe_edit
 from app.bot.keyboards import (
     BTN_TODAY,
@@ -22,11 +29,15 @@ from app.bot.keyboards import (
 )
 from app.bot.states import AddTaskStates
 from app.db.models import UserProfile
+from app.services.backup_service import BackupService
 from app.services.brain_dump import split_brain_dump
+from app.services.parsers.vision_parser import VisionScheduleParser
+from app.services.review_service import WeeklyReviewService
 from app.services.schedule_service import ScheduleService
 from app.services.task_service import TaskService
 from app.services.time_utils import format_date_ru, user_today, user_today_iso, user_tomorrow_iso
 
+logger = logging.getLogger(__name__)
 router = Router(name="tasks")
 quick_capture_router = Router(name="quick_capture")
 
@@ -49,10 +60,63 @@ async def _render_day_view(
     task_service: TaskService, user: UserProfile, day_iso: str, *, manage_mode: bool = False
 ):
     today_iso = user_today_iso(user.timezone)
-    plan = await task_service.get_day_plan(user.user_id, day_iso)
-    text = render_day_plan(plan, today_iso, manage_mode=manage_mode)
+    plan = await task_service.get_day_plan(user.user_id, day_iso, today_iso=today_iso)
+    deadlines = (
+        await task_service.list_upcoming_deadlines(user.user_id, today_iso, limit=4)
+        if day_iso == today_iso and not manage_mode
+        else None
+    )
+    text = render_day_plan(
+        plan, today_iso, manage_mode=manage_mode, upcoming_deadlines=deadlines
+    )
     kb = day_manage_kb(plan) if manage_mode else day_plan_kb(plan, today_iso)
     return text, kb
+
+
+@router.message(Command("deadlines"))
+async def cmd_deadlines(
+    message: Message,
+    state: FSMContext,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    await state.clear()
+    today_iso = user_today_iso(user_profile.timezone)
+    tasks = await task_service.list_upcoming_deadlines(user_profile.user_id, today_iso, limit=15)
+    await message.answer(render_deadlines(tasks, today_iso))
+
+
+@router.message(Command("review"))
+async def cmd_weekly_review(
+    message: Message,
+    state: FSMContext,
+    review_service: WeeklyReviewService,
+    user_profile: UserProfile,
+) -> None:
+    await state.clear()
+    status_msg = await message.answer("🧭 Собираю итоги твоей недели…")
+    today_iso = user_today_iso(user_profile.timezone)
+    html = await review_service.build_weekly_review_html(user_profile.user_id, today_iso)
+    await safe_edit(status_msg, html)
+
+
+@router.message(Command("backup"))
+async def cmd_backup_now(
+    message: Message,
+    backup_service: BackupService,
+) -> None:
+    status_msg = await message.answer("☁️ Создаю резервную копию базы…")
+    try:
+        res = await backup_service.run_backup()
+        kb_size = round(res.size_bytes / 1024, 1)
+        s3_line = f"\n☁️ S3: <code>{escape(res.s3_uri)}</code>" if res.s3_uri else "\n💾 Локальный бэкап (S3 бакет не задан)"
+        await safe_edit(
+            status_msg,
+            f"✅ Бэкап готов (<b>{kb_size} KB</b>): <code>{escape(res.local_path.name)}</code>{s3_line}",
+        )
+    except Exception as exc:
+        logger.exception("Manual backup failed")
+        await safe_edit(status_msg, f"⚠️ Ошибка бэкапа: <code>{escape(str(exc))}</code>")
 
 
 @router.message(Command("today"))
@@ -265,6 +329,36 @@ async def cb_task_priority(
     if callback.message:
         await safe_edit(callback.message, text, kb)
     await callback.answer("Приоритет изменён")
+
+
+@router.callback_query(F.data.startswith("tk:qmv:"))
+async def cb_task_quick_move(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    _, _, task_id_s, from_day, to_day = callback.data.split(":")
+    await task_service.plan_task_for_date(
+        user_profile.user_id, int(task_id_s), to_day, record_carry_over=True
+    )
+    text, kb = await _render_day_view(task_service, user_profile, from_day, manage_mode=False)
+    if callback.message:
+        await safe_edit(callback.message, text, kb)
+    await callback.answer("Перенесено на следующий день ➡️")
+
+
+@router.callback_query(F.data.startswith("tk:qpool:"))
+async def cb_task_quick_pool(
+    callback: CallbackQuery,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    _, _, task_id_s, day_iso = callback.data.split(":")
+    await task_service.move_to_pool(user_profile.user_id, int(task_id_s), record_carry_over=True)
+    text, kb = await _render_day_view(task_service, user_profile, day_iso, manage_mode=False)
+    if callback.message:
+        await safe_edit(callback.message, text, kb)
+    await callback.answer("Убрано в общий пул 🗂")
 
 
 @router.callback_query(F.data.startswith("tk:mv:"))
@@ -502,16 +596,31 @@ async def cb_brain_dump_delete(
 # --- Catch-all Quick Capture (registered LAST in dispatcher) ---
 
 
-@quick_capture_router.message(StateFilter(None), F.text)
-async def handle_quick_capture(
+def _extract_forward_source(message: Message) -> str:
+    origin = getattr(message, "forward_origin", None)
+    if not origin:
+        return ""
+    sender_user = getattr(origin, "sender_user", None)
+    if sender_user:
+        return f"Переслано от {sender_user.full_name}"
+    sender_name = getattr(origin, "sender_user_name", None)
+    if sender_name:
+        return f"Переслано от {sender_name}"
+    chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    if chat and getattr(chat, "title", None):
+        return f"Переслано из «{chat.title}»"
+    return "Пересланное сообщение"
+
+
+async def _ingest_text_as_tasks(
     message: Message,
+    raw: str,
     task_service: TaskService,
     user_profile: UserProfile,
+    *,
+    source_prefix: str = "",
+    notes: str = "",
 ) -> None:
-    raw = (message.text or "").strip()
-    if not raw or raw.startswith("/"):
-        return
-
     today = user_today(user_profile.timezone)
     today_iso = today.isoformat()
     tomorrow_iso = user_tomorrow_iso(user_profile.timezone)
@@ -525,18 +634,27 @@ async def handle_quick_capture(
         task = await task_service.create_task(
             user_profile.user_id,
             d.title,
+            notes=notes,
             planned_date=d.planned_date,
             planned_time=d.planned_time,
+            deadline_date=d.deadline_date,
+            tags=d.tags,
+            recurrence_rule=d.recurrence_rule,
             priority=d.priority,
+            today_iso=today_iso,
         )
         prio = PRIORITY_ICON.get(task.priority, "🟡")
         time_part = f"<code>{escape(task.planned_time)}</code> " if task.planned_time else ""
+        dl_badge = format_deadline_badge(task.deadline_date, today_iso)
+        dl_part = f" · <b>{dl_badge}</b>" if dl_badge else ""
+        tags_part = (" · " + " ".join(f"#{escape(t)}" for t in task.tags)) if task.tags else ""
+        rec_part = " 🔁" if task.recurrence_rule else ""
         if task.planned_date:
-            where = f"📅 На <b>{escape(format_date_ru(task.planned_date, today_iso))}</b>"
+            where = f"{source_prefix}📅 На <b>{escape(format_date_ru(task.planned_date, today_iso))}</b>"
         else:
-            where = "📥 Сохранил в инбокс"
+            where = f"{source_prefix}📥 Сохранил в инбокс"
         await message.answer(
-            f"{where}:\n• {prio} {time_part}<b>{escape(task.title)}</b>",
+            f"{where}:\n• {prio} {time_part}<b>{escape(task.title)}</b>{rec_part}{dl_part}{tags_part}",
             reply_markup=quick_capture_kb(task.id, today_iso, tomorrow_iso),
         )
         return
@@ -547,9 +665,14 @@ async def handle_quick_capture(
             await task_service.create_task(
                 user_profile.user_id,
                 d.title,
+                notes=notes,
                 planned_date=d.planned_date,
                 planned_time=d.planned_time,
+                deadline_date=d.deadline_date,
+                tags=d.tags,
+                recurrence_rule=d.recurrence_rule,
                 priority=d.priority,
+                today_iso=today_iso,
             )
         )
 
@@ -559,23 +682,96 @@ async def handle_quick_capture(
         oldest = next(iter(_RECENT_BATCHES))
         _RECENT_BATCHES.pop(oldest, None)
 
-    lines = [f"🧠 <b>Разобрал сообщение на {len(created)} задач:</b>", ""]
+    lines = [f"{source_prefix}🧠 <b>Разобрал на {len(created)} задач:</b>", ""]
     for idx, t in enumerate(created[:12], start=1):
         prio = PRIORITY_ICON.get(t.priority, "🟡")
         time_part = f"<code>{escape(t.planned_time)}</code> " if t.planned_time else ""
+        extras: list[str] = []
         if t.planned_date == today_iso:
-            tag = " <i>(сегодня)</i>"
+            extras.append("сегодня")
         elif t.planned_date == tomorrow_iso:
-            tag = " <i>(завтра)</i>"
+            extras.append("завтра")
         elif t.planned_date:
-            tag = f" <i>({escape(format_date_ru(t.planned_date, today_iso))})</i>"
-        else:
-            tag = ""
-        lines.append(f"{idx}. {prio} {time_part}{escape(t.title)}{tag}")
+            extras.append(format_date_ru(t.planned_date, today_iso))
+        if t.deadline_date:
+            extras.append(format_deadline_badge(t.deadline_date, today_iso))
+        if t.tags:
+            extras.append(" ".join(f"#{tag}" for tag in t.tags[:2]))
+        if t.recurrence_rule:
+            extras.append("🔁")
+        suffix = f" <i>({escape(' · '.join(extras))})</i>" if extras else ""
+        lines.append(f"{idx}. {prio} {time_part}{escape(t.title)}{suffix}")
     if len(created) > 12:
         lines.append(f"<i>…и ещё {len(created) - 12}</i>")
 
     await message.answer(
         "\n".join(lines),
         reply_markup=brain_dump_batch_kb(batch_id, today_iso, tomorrow_iso),
+    )
+
+
+@quick_capture_router.message(StateFilter(None), F.voice | F.audio)
+async def handle_voice_capture(
+    message: Message,
+    bot: Bot,
+    task_service: TaskService,
+    vision_parser: VisionScheduleParser,
+    user_profile: UserProfile,
+) -> None:
+    if not vision_parser.voice_enabled:
+        await message.answer(
+            "🎙 <b>Расшифровка голосовых сообщений ещё не подключена.</b>\n\n"
+            "Чтобы надиктовывать задачи голосом, добавь в <code>.env</code>:\n"
+            "<code>GEMINI_API_KEY=...</code> (или <code>OPENAI_API_KEY=...</code>)."
+        )
+        return
+
+    media = message.voice or message.audio
+    if not media:
+        return
+    status_msg = await message.answer("🎙 Расшифровываю голосовое…")
+    buf = io.BytesIO()
+    await bot.download(media.file_id, destination=buf)
+    mime = getattr(media, "mime_type", None) or "audio/ogg"
+    try:
+        transcript = await vision_parser.transcribe_audio(buf.getvalue(), mime_type=mime)
+    except Exception:
+        logger.exception("Voice transcription failed")
+        await safe_edit(status_msg, "⚠️ Не удалось расшифровать голосовое. Попробуй ещё раз.")
+        return
+
+    if not transcript:
+        await safe_edit(status_msg, "😕 Не разобрал речь в голосовом сообщении.")
+        return
+
+    await safe_edit(status_msg, f"🎙 <i>«{escape(transcript)}»</i>")
+    await _ingest_text_as_tasks(
+        message,
+        transcript,
+        task_service,
+        user_profile,
+        source_prefix="🎙 ",
+        notes="Из голосового сообщения",
+    )
+
+
+@quick_capture_router.message(StateFilter(None), F.text)
+async def handle_quick_capture(
+    message: Message,
+    task_service: TaskService,
+    user_profile: UserProfile,
+) -> None:
+    raw = (message.text or "").strip()
+    if not raw or raw.startswith("/"):
+        return
+
+    fwd_note = _extract_forward_source(message)
+    prefix = f"↪️ <i>{escape(fwd_note)}</i>\n" if fwd_note else ""
+    await _ingest_text_as_tasks(
+        message,
+        raw,
+        task_service,
+        user_profile,
+        source_prefix=prefix,
+        notes=fwd_note,
     )
